@@ -1007,7 +1007,9 @@ export function useStudio() {
       refreshHistory()
     } catch (err) {
       if (pidRef.current === pid) {
-        setChatMsgs((m) => [...m, { who: 'claude', text: `⚠ Chat failed: ${err}`, ts: Date.now() / 1000 }])
+        setChatMsgs((m) => [...m, { who: 'claude', text: err?.gone
+          ? '⚠ The server restarted while this was running, so it lost track of the job. Nothing was damaged — send the request again.'
+          : `⚠ Chat failed: ${err}`, ts: Date.now() / 1000 }])
       }
     } finally {
       clearTimeout(typingTimer.current)
@@ -1044,7 +1046,9 @@ export function useStudio() {
         refreshHistory()
       } catch (err) {
         if (pidRef.current === pid) {
-          setChatMsgs((m) => [...m, { who: 'claude', text: `⚠ Chat failed: ${err}`, ts: Date.now() / 1000 }])
+          setChatMsgs((m) => [...m, { who: 'claude', text: err?.gone
+          ? '⚠ The server restarted while this was running, so it lost track of the job. Nothing was damaged — send the request again.'
+          : `⚠ Chat failed: ${err}`, ts: Date.now() / 1000 }])
         }
         return
       } finally {

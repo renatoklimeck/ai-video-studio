@@ -162,6 +162,15 @@ export async function pollJob(jid, onProgress) {
       // worth waiting out. A definitive HTTP status (404 gone job, 401, 5xx) is
       // permanent — the in-memory JOBS dict never re-adds a missing id — so fail
       // fast instead of freezing every caller's progress bar for ~30s.
+      if (/^HTTP 404/.test(err?.message || '')) {
+        // The job id is gone, which on a local single-user app means one thing:
+        // the server restarted while this was running (JOBS lives in memory).
+        // Saying "Chat failed: HTTP 404" for that sends you hunting a bug in
+        // your own edit — name what actually happened instead.
+        const e = new Error('JOB_GONE')
+        e.gone = true
+        throw e
+      }
       if (/^HTTP /.test(err?.message || '')) throw err
       if (++fails > 40) throw err // ~40 × 800ms ≈ 30s of transport failures → give up
     }

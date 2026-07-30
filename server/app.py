@@ -2301,9 +2301,68 @@ Reply to the user in 1-3 short sentences (plain text, same language as the user'
                                              pend.get("preset"))
                 except Exception:
                     pass
+            _mark_chat_idle(d, jid)
 
+    _mark_chat_running(d, jid, label)
     threading.Thread(target=work, daemon=True).start()
     return jid
+
+
+# A chat job lives in memory, so a restart erases every trace of it and the tab
+# polling it just gets a 404. That is not exotic: the Update button restarts the
+# server on purpose. Leave a breadcrumb on disk so the next boot can say what
+# happened instead of letting an edit die in silence.
+def _running_file(d: Path) -> Path:
+    return d / ".chat_running.json"
+
+
+def _mark_chat_running(d: Path, jid: str, label: str):
+    try:
+        _running_file(d).write_text(json.dumps(
+            {"job": jid, "label": label, "at": time.time()}, ensure_ascii=False))
+    except OSError:
+        pass
+
+
+def _mark_chat_idle(d: Path, jid: str = None):
+    """Clear the breadcrumb — but only if it is still OURS. The script step hands
+    straight over to the real edit inside its own finally block, so clearing
+    blindly erases the marker the job that just started had already written."""
+    try:
+        if jid is not None:
+            try:
+                if json.loads(_running_file(d).read_text()).get("job") != jid:
+                    return
+            except (OSError, ValueError):
+                return
+        _running_file(d).unlink()
+    except OSError:
+        pass
+
+
+def report_interrupted_chats():
+    """Called once at startup: tell each project whose edit we killed."""
+    try:
+        dirs = [p for p in PROJECTS.iterdir() if p.is_dir()]
+    except OSError:
+        return
+    for d in dirs:
+        f = _running_file(d)
+        if not f.exists():
+            continue
+        try:
+            info = json.loads(f.read_text())
+        except (OSError, ValueError):
+            info = {}
+        _mark_chat_idle(d)
+        what = f" (“{info.get('label')}”)" if info.get("label") else ""
+        try:
+            chat_append(d, "claude",
+                        f"⚠ The server restarted while I was working on this{what}, so that "
+                        "run stopped where it was. Nothing was damaged — send it again when "
+                        "you are ready.")
+        except Exception:  # noqa: BLE001 — a broken chat file must not block boot
+            pass
 
 
 @app.post("/api/project/{pid}/approve_script")
@@ -2481,6 +2540,8 @@ Reply with ONE short line: how many caption groups you corrected."""
     threading.Thread(target=work, daemon=True).start()
     return {"job": jid}
 
+
+report_interrupted_chats()   # say what the last shutdown cut short, before serving
 
 web_dist = ROOT / "web" / "dist"
 if web_dist.exists():
