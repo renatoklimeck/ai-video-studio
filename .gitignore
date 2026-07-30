@@ -1,0 +1,36 @@
+node_modules/
+web/dist/
+.venv/
+__pycache__/
+projects/*/media/proxy_*
+projects/*/cache/
+projects/*/exports/
+projects/*/history/
+*.pyc
+projects/*/chat.json
+projects/*/thumb.jpg
+server.log
+.certs/
+
+# imported/generated media — local only, never commit (a 168MB source.mp4 slipped
+# in once via git add -A). project.json holds the edit state; media stays local.
+projects/*/media/
+projects/*/project.json.capbak
+
+# cada máquina tem os seus projetos — nunca compartilhados
+projects/
+
+# macOS
+.DS_Store
+
+# local-only: seeds a specific client's project from footage that only exists on
+# this Mac, and names her and her unreleased copy. Never publish.
+scripts/seed_kelly.py
+
+# internal planning notes (reference a private tracker)
+BACKLOG-AIVS-22.md
+
+# design handoff (vendored third-party build; not needed to run the app)
+design/
+# superseded by README.md, kept locally
+README-ALUNO.md

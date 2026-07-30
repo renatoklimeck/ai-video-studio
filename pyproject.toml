@@ -1,0 +1,18 @@
+[project]
+name = "video-studio"
+version = "0.1.0"
+description = "Renato's personal video adjustment studio (Claude edits -> fine-tune -> export)"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.111",
+    "uvicorn>=0.30",
+    "python-multipart>=0.0.9",
+    "pillow>=10.0",
+    "numpy>=1.26",
+    "opencv-python>=4.9",
+    "rembg>=2.0.57",
+    "onnxruntime>=1.17",
+    "numba>=0.59",
+    "llvmlite>=0.42",
+    "pymatting>=1.1.12",
+]
