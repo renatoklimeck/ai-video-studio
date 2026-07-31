@@ -22,6 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from takes import _norm, build_takes  # noqa: E402
+from cleanup import _covered, _sim  # noqa: E402
 
 HERE = Path(__file__).parent
 
@@ -29,13 +30,14 @@ HERE = Path(__file__).parent
 # a trim is allowed to shave off. Both are small on purpose: this is meant to
 # remove a two-word stumble, not to re-cut the take.
 TRIM_SEARCH = 8
-# 3s is enough to swallow a stumble plus the pause after it ("sem ambição," then
-# 1.7s then the real opening). It is safe at that size because the trim only
-# fires on an exact match of the line's first three words inside the first
-# TRIM_SEARCH words — a coincidence there is not realistic.
+# Still the ceiling for a TAIL trim. The head trim outgrew it: a take can open
+# with eight seconds of the previous line, and what makes a long head cut safe is
+# not a stopwatch but proof that the whole line survives it (COVER_KEEP).
 TRIM_MAX = 3.0
 TRIM_LEAD = 0.06
 TRIM_TAIL = 0.10
+# how much of the line must survive a head trim for that trim to be allowed
+COVER_KEEP = 0.80
 
 
 def trim_to_line(t, line):
@@ -53,11 +55,28 @@ def trim_to_line(t, line):
     toks = [_norm(w[2]) for w in wt]
     t_in, t_out = t["in"], t["out"]
 
+    # Where does this line REALLY start inside the take? Two things broke here,
+    # and both shipped a wrong cut:
+    #
+    #   * exact matching. The script says "Eu vivo assim", he said "Eu vivo
+    #     isso" — one word, and the trim silently did nothing, so the clip kept
+    #     a stumble and then said the whole line a second time.
+    #   * looking only at the first few words, and never cutting more than 3s.
+    #     A take can open with the tail of the PREVIOUS line (8 seconds of it),
+    #     and the real opening sits at word 19.
+    #
+    # So: search the whole take, fuzzily, and take the LAST opening that still
+    # leaves the entire line behind it. Cutting can never eat the line itself —
+    # that is what the coverage test guarantees — and the cut still has to land
+    # on measured silence below.
+    starts_at = _line_starts(toks, line_toks)
     head = line_toks[:3]
-    for k in range(1, min(TRIM_SEARCH, len(toks) - 2)):
-        if toks[k:k + 3] == head:
+    fallback = [k for k in range(1, max(1, min(TRIM_SEARCH, len(toks) - 2)))
+                if toks[k:k + 3] == head]
+    for k in (starts_at or fallback):
+        if k:
             cut = wt[k][0] - TRIM_LEAD
-            prev_end = wt[k - 1][1]
+            prev_end = wt[k - 1][1] if k else wt[0][0]
             if prev_end < wt[k][0]:            # land in the gap when there is one
                 cut = max(cut, (prev_end + wt[k][0]) / 2)
             # Snap onto the VOICE. Whisper's t0 runs early, so trimming to it
@@ -66,7 +85,7 @@ def trim_to_line(t, line):
             starts = [a for a, _b in (t.get("sruns") or []) if a >= cut - 0.25]
             if starts:
                 cut = max(cut, min(starts) - TRIM_LEAD)
-            if t["in"] < cut <= t["in"] + TRIM_MAX:
+            if t["in"] < cut < t["out"] - 0.3:
                 t_in = round(cut, 3)
             break
 
@@ -94,7 +113,53 @@ def trim_to_line(t, line):
     return (t_in, t_out) if t_out - t_in > 0.3 else (t["in"], t["out"])
 
 
-def assemble(pdir: Path, plan: dict, allow_quiet=False):
+def _line_starts(toks, line_toks):
+    """Every position where this line plausibly BEGINS inside the take, latest
+    first, keeping only the ones that still leave the whole line behind them.
+
+    Fuzzy on purpose (earcheck learned this the hard way): the approved line says
+    "assim" where he said "isso", and an exact test found nothing at all — so a
+    take that delivered the line twice, stumble and all, shipped from its first
+    word. The coverage test is what makes a long cut safe: we never move past
+    words the line still needs."""
+    if len(line_toks) < 3 or len(toks) < 3:
+        return []
+    # Do not look for the opening WORDS. He re-says a line with an extra word in
+    # front ("Eu vivo isso…" then "Eu JÁ vivo isso…") and any fixed-width match
+    # on the first three tokens misses the second delivery entirely — which is
+    # the one he meant to keep.
+    #
+    # Ask the only question that matters instead: how late can this clip start
+    # without losing a single word of the line? Whatever sits before that point
+    # is, by construction, not part of the line — a stumble, a repeat, or the
+    # tail of the previous one.
+    best = len(_covered(toks, line_toks))
+    if best < COVER_KEEP * len(line_toks):
+        return []                      # the take does not really carry this line
+    lo, hi = 0, len(toks) - 1
+    while lo < hi:                     # coverage only falls as k grows: bisect
+        mid = (lo + hi + 1) // 2
+        if len(_covered(toks[mid:], line_toks)) >= best:
+            lo = mid
+        else:
+            hi = mid - 1
+    # Belt and braces: the new head must BE the start of the line, not some word
+    # in the middle of it. Without this, a line whose opening word he never said
+    # could slide the cut inward and the clip would open mid-sentence.
+    if lo > 0 and any(_sim(toks[lo], w) >= 0.7 for w in line_toks[:2]):
+        return [lo]
+    return []
+
+
+def assemble(pdir: Path, plan: dict, allow_quiet=False, trusted=()):
+    """`trusted` = take ids whose flags were CHECKED BY LISTENING and found wrong.
+
+    The flags are heuristics over a transcript that lies. A take reading its line
+    perfectly at normal volume was marked FALSE START because whisper bled the
+    next take's words into it, and since it was the only take covering that line
+    the whole edit dead-ended on "nothing was changed". A flag may refuse a take;
+    it may not refuse it after the audio has been heard and disagrees."""
+    trusted = set(trusted or ())
     src_key = plan.get("src") or "main"
     data = build_takes(pdir, src_key)
     if data.get("issues"):
@@ -156,13 +221,13 @@ def assemble(pdir: Path, plan: dict, allow_quiet=False):
             if not t:
                 problems.append(f"line {line_no}: take {tid} does not exist")
                 continue
-            if t.get("aborted"):
+            if t.get("aborted") and tid not in trusted:
                 problems.append(
                     f"line {line_no}: take {tid} is a FALSE START "
                     f"(\"{t['text'][:40]}\") — he stopped and went again, use a later take")
                 continue
             quiet = any("QUIET" in f for f in t["flags"])
-            if quiet and not allow_quiet:
+            if quiet and not allow_quiet and tid not in trusted:
                 problems.append(
                     f"line {line_no}: take {tid} is flagged as a rehearsal "
                     f"({t.get('db_rel')}dB below the session) — pick another")

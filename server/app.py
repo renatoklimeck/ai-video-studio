@@ -674,6 +674,30 @@ Output ONLY compact JSON, nothing else: {{"picks":[{{"line":1,"takes":[3]}}]}}""
             except Exception:  # noqa: BLE001
                 pass
     if not res.get("ok"):
+        # LAST RESORT, and the one that matters: stop asking the model and work
+        # the answer out from the audio. "Nothing was changed" is the worst
+        # possible outcome — he cannot fix it from the app, and it happens for a
+        # reason he cannot see (one take flagged FALSE START by mistake was
+        # enough to dead-end a whole edit whose correct cut was sitting there).
+        try:
+            from cleanup import picks_from_script  # noqa: PLC0415
+            auto, trusted = picks_from_script(d, src_key, table["takes"], script_lines)
+            if auto:
+                res2 = assemble(d, {"src": src_key, "picks": auto}, trusted=trusted)
+                if res2.get("ok"):
+                    res = res2
+                    covered = {p["line"] for p in auto}
+                    missing = [i for i in range(1, len(script_lines) + 1) if i not in covered]
+                    note = ("\n⚠ Linha(s) " + ", ".join(map(str, missing)) +
+                            " não têm nenhuma tentativa completa na gravação — ficaram de fora."
+                            ) if missing else ""
+                    return (f"Primeira edição pronta: {res['clips']} cortes ({res['duration']:.0f}s), "
+                            f"{res['captions']} grupos de legenda. O plano do modelo foi recusado, "
+                            f"então escolhi os takes medindo cada tentativa contra o roteiro"
+                            + (f" (e ouvindo {len(trusted)} take(s) isolados para conferir uma flag "
+                               "que estava errada)" if trusted else "") + f".{note}")
+        except Exception:  # noqa: BLE001 — the fallback must never mask the real error
+            pass
         return ("⚠ Nothing was changed — the plan was rejected: " + "; ".join(res.get("problems", [])[:3]))
     lines = len({p.get("line") for p in picks["picks"]})
     return (f"Primeira edição pronta: {res['clips']} cortes ({res['duration']:.0f}s) cobrindo as "

@@ -656,6 +656,98 @@ def relisten(pdir, src_key, takes, ids):
     return text
 
 
+def picks_from_script(pdir, src_key, takes, script_lines):
+    """Choose ONE take per script line, by measurement. Returns (picks, trusted).
+
+    This is the net under the AI's plan. When the model picks a take the
+    assembler refuses, the run used to end on "nothing was changed" — useless,
+    and impossible for him to fix from the app. The same alignment the clean pass
+    uses answers the question directly: which attempts finish this line, and
+    which of those is the last one that is not junk.
+
+    `trusted` are ids whose disqualifying flag was checked BY LISTENING and found
+    wrong. Only takes that are the last hope for a line are ever re-listened, and
+    only a re-listen that still reads the line clears the flag."""
+    atts, _line_of = attempts_from_script(takes, script_lines, lambda t: t["text"])
+    by_id = {t["id"]: t for t in takes}
+
+    def flagged(tid):
+        t = by_id.get(tid) or {}
+        return bool(t.get("aborted")) or any("QUIET" in f for f in t.get("flags") or [])
+
+    by_line = {}
+    for a in atts:
+        if a["complete"]:
+            by_line.setdefault(a["line"], []).append(a)
+
+    picks, trusted, open_lines = [], set(), []
+    for line in range(len(script_lines)):
+        clean = [a for a in by_line.get(line, [])
+                 if not any(flagged(t) for t in a["takes"])]
+        if clean:
+            picks.append({"line": line + 1, "takes": list(clean[-1]["takes"])})
+        else:
+            open_lines.append(line)
+
+    # Only now, and only for the lines still open, pay for the ear. Two different
+    # failures land here and both need the same answer: a line whose only
+    # candidates are flagged, and a line with no complete attempt at all —
+    # because the transcript ROTATES a take's words onto its neighbour, so the
+    # take that reads the line perfectly scores as a fragment.
+    if open_lines:
+        window = set()
+        for line in open_lines:
+            for a in atts:
+                if abs(a["line"] - line) <= 1:
+                    window.update(a["takes"])
+        heard = relisten(pdir, src_key, takes, sorted(window - set()))
+        if heard:
+            atts2, _ = attempts_from_script(
+                takes, script_lines,
+                lambda t: heard.get(t["id"], t["text"]), set(heard))
+            by_line2 = {}
+            for a in atts2:
+                if a["complete"]:
+                    by_line2.setdefault(a["line"], []).append(a)
+            for line in open_lines:
+                cands = by_line2.get(line) or []
+                if not cands:
+                    continue
+                clean = [a for a in cands if not any(flagged(t) for t in a["takes"])]
+                best = (clean or cands)[-1]
+                picks.append({"line": line + 1, "takes": list(best["takes"])})
+                if not clean:
+                    trusted.update(best["takes"])   # heard, and the flag was wrong
+    # A line can END inside the take that OPENS the next one — "Soma esse valor e
+    # divide por 12." | "Essa é a sua média mensal. Nunca gaste mais do que
+    # isso." Each take is credited to one line, so the first line looks half
+    # said. The assembler already understands one take serving two consecutive
+    # lines, so complete the line by reaching forward instead of dropping it.
+    taken = {p["line"] for p in picks}
+    order = [t["id"] for t in takes]
+    for line in range(len(script_lines)):
+        if line + 1 in taken:
+            continue
+        partial = [a for a in atts if a["line"] == line]
+        if not partial:
+            continue
+        chain = list(partial[-1]["takes"])
+        want = _toks(script_lines[line])
+        for _ in range(2):
+            nxt = order.index(chain[-1]) + 1 if chain[-1] in order else len(order)
+            if nxt >= len(order):
+                break
+            chain.append(order[nxt])
+            toks = [w for tid in chain for w in _toks(by_id[tid]["text"])]
+            if len(_covered(toks, want)) >= COMPLETE_COVER * len(want):
+                picks.append({"line": line + 1, "takes": chain})
+                if any(flagged(t) for t in chain):
+                    trusted.update(chain)
+                break
+    picks.sort(key=lambda p: p["line"])
+    return picks, sorted(trusted)
+
+
 def uncovered_speech(pdir, src_key, takes):
     """Stretches of real speech that fall inside NO take, longest first.
 
