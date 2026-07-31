@@ -376,10 +376,27 @@ PRE_MARKER_PRESETS = {"first-edit"}
 
 
 def read_prefs() -> str:
+    """The editing rules injected into every AI edit.
+
+    Seeded from the ones shipped with the app the first time, so a fresh install
+    edits the way this app is meant to edit instead of starting with no opinion
+    at all — those nine rules are most of the difference between a usable first
+    cut and a rough one. After that the file is the user's: it is never
+    overwritten, and the app grows it from his own corrections."""
     try:
         return PREFS_FILE.read_text().strip()
     except OSError:
+        pass
+    try:
+        seed = (ROOT / "server" / "default_preferences.md").read_text().strip()
+    except OSError:
         return ""
+    try:
+        PREFS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(PREFS_FILE, seed + "\n")
+    except OSError:
+        pass          # read-only home: still edit well this session
+    return seed
 
 
 def append_pref(rule: str):
