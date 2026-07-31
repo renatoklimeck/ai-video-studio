@@ -71,6 +71,10 @@ done
 # ── 3. Python environment ─────────────────────────────────────────────────────
 step "3/8  Python environment (.venv)"
 cd "$ROOT"
+# projects/ is gitignored, so a fresh clone does not have it. The server creates
+# it on demand, but the command-line tools do not — and neither does a `cp` of
+# somebody else's project into a folder that is not there yet.
+mkdir -p "$ROOT/projects"
 uv sync --quiet
 ok "$(.venv/bin/python --version) with $(grep -c '^ *"' pyproject.toml || echo '') dependencies"
 
