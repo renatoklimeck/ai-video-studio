@@ -12,12 +12,22 @@ export default function UpdateButton() {
   const [lines, setLines] = useState([])
   const poll = useRef(null)
 
+  const [ask, setAsk] = useState(null)   // the "there is a new version" prompt
+
   useEffect(() => {
     let dead = false
     const check = async () => {
       try {
         const r = await api.updateCheck()
-        if (!dead && r.supported && r.behind > 0) setState(r)
+        if (!dead && r.supported && r.behind > 0) {
+          setState(r)
+          // Ask once per version. A chip in the corner is easy to never notice,
+          // and someone who never updates is running the bugs we already fixed;
+          // asking every launch would be nagging, so the answer is remembered
+          // against the version it was given for.
+          const key = 'vs-update-asked'
+          if (localStorage.getItem(key) !== r.latest) setAsk({ ...r, key })
+        }
       } catch { /* offline — the app works fine without this */ }
     }
     check()
@@ -26,6 +36,7 @@ export default function UpdateButton() {
   }, [])
 
   const run = async () => {
+    setAsk(null)
     setPhase('running')
     try { await api.updateRun() } catch { setPhase('failed'); return }
     // Keep polling THROUGH the restart at the end: the requests that fail while
@@ -53,6 +64,25 @@ export default function UpdateButton() {
 
   return (
     <div className="updater">
+      {ask && phase === 'idle' && (
+        <div className="update-ask-back" onClick={() => setAsk(null)}>
+          <div className="update-ask" onClick={(e) => e.stopPropagation()}>
+            <h3>A new version is available</h3>
+            <p className="update-ask-what">{ask.latest}</p>
+            <p className="update-ask-note">
+              It takes about a minute. Your projects are not touched, and if
+              anything fails it puts the working version back.
+            </p>
+            <div className="update-ask-actions">
+              <button className="btn-modal" onClick={() => {
+                localStorage.setItem(ask.key, ask.latest || '')
+                setAsk(null)
+              }}>Not now</button>
+              <button className="btn-modal primary" onClick={run}>Update now</button>
+            </div>
+          </div>
+        </div>
+      )}
       {phase === 'idle' && (
         <button className="btn-update" onClick={run}
                 title={state.latest ? `Latest: ${state.latest}` : 'Install the new version'}>

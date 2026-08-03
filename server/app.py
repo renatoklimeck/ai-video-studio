@@ -614,6 +614,32 @@ def run_take_pipeline(pid, d: Path, model_key, effort):
     if table.get("issues"):
         return "⚠ I could not segment the takes safely: " + "; ".join(table["issues"][:2])
 
+    # MEASURE FIRST, ASK SECOND.
+    #
+    # Choosing a take is not a judgement call once the script is approved: it is
+    # "which attempt says this line, all the way to the end, without a flag on
+    # it". Code answers that in a second and gets it right; the model takes a
+    # minute of thinking and got it wrong on the last two videos — once badly
+    # enough to dead-end the whole edit. So try the arithmetic first and only
+    # spend the round trip when it cannot cover every line.
+    try:
+        from cleanup import picks_from_script  # noqa: PLC0415
+        auto, trusted = picks_from_script(d, src_key, table["takes"], script_lines)
+        if len(auto) == len(script_lines):
+            res = assemble(d, {"src": src_key, "picks": auto}, trusted=trusted)
+            if res.get("ok"):
+                try:
+                    snapshot(d, read_project(d), "First cut", "claude")
+                except Exception:  # noqa: BLE001
+                    pass
+                return (f"Primeira edição pronta: {res['clips']} cortes "
+                        f"({res['duration']:.0f}s) cobrindo as {len(script_lines)} linhas do "
+                        f"roteiro, e {res['captions']} grupos de legenda gerados do corte final."
+                        + (f" Ouvi {len(trusted)} take(s) isolados para conferir uma flag que "
+                           "estava errada." if trusted else ""))
+    except Exception:  # noqa: BLE001 — never let the shortcut break the real path
+        pass
+
     numbered = "\n".join(f"{i}. {l}" for i, l in enumerate(script_lines, 1))
     ask = f"""You are assembling a video from pre-cut TAKES. You do NOT write timestamps — you only choose take numbers.
 
@@ -1243,6 +1269,18 @@ async def import_project(file: UploadFile):
             gen_thumb(d, force=True)
         except Exception:
             pass
+        # …then get the words, right now, while he is still looking at the video.
+        #
+        # Transcribing eight minutes takes two minutes, and it used to happen
+        # INSIDE the first edit: he clicked the preset and watched a spinner for
+        # the whole of it, on the AI's clock, which is also what made that step
+        # time out. Nothing about it depends on what he asks for, so it has no
+        # business being on the critical path. Started here it is almost always
+        # finished before he clicks anything.
+        try:
+            prewarm_transcript(d, "main")
+        except Exception:  # noqa: BLE001 — an import must never fail over this
+            pass
 
     threading.Thread(target=attach_proxy, daemon=True).start()
     gen_thumb(d, force=True)
@@ -1460,6 +1498,46 @@ async def transcribe_source(pid: str, request: Request):
     jid = run_job([sys.executable, str(RENDER / "transcribe_source.py"),
                    str(d), body["path"], out_rel, "--lang", lang])
     return {"job": jid, "path": out_rel}
+
+
+PREWARM = {}                 # pid -> job id, so the UI can show it running
+PREWARM_LOCK = threading.Lock()
+
+
+def prewarm_transcript(d: Path, key="main"):
+    """Transcribe a freshly imported source in the background, once.
+
+    Skips silently when a fresh transcript already exists — re-importing the same
+    video, or a project restored from elsewhere, must not pay for it twice."""
+    if any(k == key for k, _p in source_transcripts(d)):
+        return None
+    try:
+        src = (read_project(d).get("sources") or {}).get(key) or {}
+        rel = src.get("path")
+    except OSError:
+        return None
+    if not rel:
+        return None
+    out_rel = f"media/transcript_{key}.json"
+    with PREWARM_LOCK:
+        running = PREWARM.get(d.name)
+        if running and JOBS.get(running, {}).get("status") == "running":
+            return running
+        jid = run_job([sys.executable, str(RENDER / "transcribe_source.py"),
+                       str(d), rel, out_rel, "--lang", "auto"])
+        PREWARM[d.name] = jid
+    return jid
+
+
+@app.get("/api/project/{pid}/prewarm")
+def prewarm_status(pid: str):
+    """Is the automatic transcription still running for this project?"""
+    d = pdir(pid)
+    fresh = any(k == "main" for k, _p in source_transcripts(d))
+    jid = PREWARM.get(d.name)
+    st = JOBS.get(jid or "", {})
+    return {"ready": fresh, "running": st.get("status") == "running",
+            "progress": st.get("progress"), "total": st.get("total")}
 
 
 @app.get("/api/project/{pid}/transcript")
