@@ -121,3 +121,5 @@ formal: não redistribua nem venda como se fosse seu.
 | detecção de voz | [Silero VAD](https://github.com/snakers4/silero-vad) | MIT |
 | fontes em `web/public/fonts/` | Google Fonts | SIL Open Font License 1.1 |
 | vídeo e áudio | [FFmpeg](https://ffmpeg.org) | LGPL/GPL |
+
+<!-- teste do aviso de versão nova -->
