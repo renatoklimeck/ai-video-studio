@@ -7,13 +7,16 @@ The web preview approximates this with a CSS filter; the divergence is
 accepted and documented in the QA issue.
 
 Slider -> operation mapping (all strengths scaled by the master m below):
-  intensity : master scale m = 0.4 + 0.6*(intensity/100)  (mirrors the CSS
-              preview formula's (0.4+0.6k) factor)
-  smooth    : frequency separation, then the edge-preserving filter runs on the
-              LOW band only — blotches merge, pores are added back untouched
-              (>=88%). The direction matters: the old chain did it the other way
-              round and measured 74% texture with 95% of the blotchiness still
-              there, which is the recipe for plastic skin (REN-170)
+  intensity : master trim, m = intensity/100. It was 0.4 + 0.6*(intensity/100)
+              with a default of 50, so a fine-tune set to 100 delivered 70 and
+              every slider felt weaker than its number (REN-177)
+  smooth    : frequency separation, then a GUIDED filter on the LOW band only —
+              blotches merge, pores come back untouched (>=88%). Two things had
+              to be true and neither was: the direction (the old chain flattened
+              the high band and left the blotches, i.e. plastic skin, REN-170),
+              and the filter (a bilateral PRESERVES soft edges, and a blotch is
+              a soft edge, so it defended what the slider exists to remove —
+              guided beats it on both texture and blotchiness, REN-177)
   even      : LAB a/b low-frequency variation pulled toward the skin mean
               (evens redness/blotches without changing luminance = no
               whitening). Fades out where the light is extreme — a specular
@@ -204,10 +207,13 @@ class Retouch:
 
         mask = np.zeros((h, w), np.uint8)
         cv2.fillPoly(mask, [poly(rings["oval"])], 255)
-        # Pull the boundary IN a little. The oval runs along the hairline and
-        # the jaw, and treating right up to it bleeds the effect into hair and
-        # into the neck behind the chin.
-        er = max(3, int(fw * 0.035)) | 1
+        # Pull the boundary IN, but only just. A hard erosion plus a narrow
+        # feather is what printed a flat band across the top of his forehead at
+        # the strong settings: the mask stopped at the hairline while the skin
+        # kept going, so treated and untreated forehead met at a line. The hair
+        # itself is already held back by its own texture energy, so the polygon
+        # does not need to retreat far — the wide feather below does the rest.
+        er = max(3, int(fw * 0.012)) | 1
         mask = cv2.erode(mask, np.ones((er, er), np.uint8))
         # cut out what must never be smoothed, each by its own outline
         for key, grow in (("eyeL", 0.030), ("eyeR", 0.030),
@@ -260,8 +266,12 @@ class Retouch:
         # below is needed and none of its holes appear.
         lm_mask = self._mask_from_points((h, w), off[0], off[1], fw)
         if lm_mask is not None:
+            # A WIDE feather, because the effect is now strong (REN-177). At the
+            # top of the slider a narrow edge shows up as a flat cap across the
+            # forehead where the mask stops — the treated skin and the untreated
+            # skin no longer look like the same face.
             skin_f = cv2.GaussianBlur(
-                lm_mask, (max(3, int(fw * 0.05)) | 1,) * 2, 0).astype(np.float32) / 255.0
+                lm_mask, (max(3, int(fw * 0.15)) | 1,) * 2, 0).astype(np.float32) / 255.0
             # BEARD AND STUBBLE ARE NOT SKIN (REN-176).
             #
             # The polygon is the whole face, so it includes the beard — and
@@ -397,7 +407,13 @@ class Retouch:
         m3 = mask[:, :, None]
         under_m = under_m * mask
 
-        m = 0.4 + 0.6 * (rt.get("intensity", 35) / 100.0)  # master scale
+        # THE SLIDERS MEAN WHAT THEY SAY (REN-177).
+        #
+        # This used to be 0.4 + 0.6*(intensity/100), and Intensity opens at 50 —
+        # so setting a fine-tune to 100 delivered 70, and every complaint that
+        # "nada muda mesmo no máximo" was partly this quietly halving him. The
+        # master is now a plain trim: 100 = the slider's own value.
+        m = rt.get("intensity", 100) / 100.0
         s = {k: rt.get(k, 0) / 100.0 * m for k in
              ("smooth", "even", "blem", "shine", "plump", "eyes", "circles", "dewrinkle")}
         src = roi.astype(np.float32)
@@ -433,15 +449,33 @@ class Retouch:
                              if sc < 1.0 else im.astype(np.float32))
             low = up(small)
             high = src - low
-            # three gentle passes flatten far more than one strong one, and keep
-            # the real shading (nose, jaw) that one strong pass would iron out
-            # d is pinned rather than derived from sigmaSpace: letting OpenCV
-            # size the kernel gave a ~29px radius and 294 ms/frame, and three
-            # cheap passes reach further than one expensive one anyway (the
-            # radii add in quadrature).
-            sc_col = 18 + 80 * s["smooth"]
-            for _ in range(3):
-                small = cv2.bilateralFilter(small, 11, sc_col, 13)
+            # GUIDED FILTER, NOT BILATERAL (REN-177).
+            #
+            # "nao muda praticamente nada, mesmo eu colocando varios botoes no
+            # maximo" — he was right, and the reason is what a bilateral filter
+            # is FOR. It preserves edges, and a blotch is a soft edge, so the
+            # filter defends exactly what the slider is supposed to remove. Its
+            # reach was also ~7% of the face width while a cheek patch is wider
+            # than that.
+            #
+            # Measured on his frame at full strength:
+            #   bilateral (before)  blotchiness 85% of original, texture 83%
+            #   guided r14          blotchiness 83%,             texture 88%
+            #   guided r20          blotchiness 72%,             texture 86%
+            # Strictly better on BOTH axes: it flattens far more and keeps more
+            # pore. Past r28 the forehead shows a flat cap where the mask ends,
+            # so the top of the slider stops at r20.
+            rad = int(round(4 + 16 * s["smooth"]))
+            eps = 100.0 + 700.0 * s["smooth"]
+            try:
+                g = small
+                for _ in range(2):
+                    g = cv2.ximgproc.guidedFilter(g, g, rad, eps)
+                small = g
+            except AttributeError:
+                # plain opencv-python (no contrib): fall back to the old filter
+                for _ in range(3):
+                    small = cv2.bilateralFilter(small, 11, 18 + 80 * s["smooth"], 13)
             flat = up(small)
             keep = 1.0 - 0.12 * s["smooth"]   # texture never drops below 88%
             sm = flat + high * keep
@@ -531,8 +565,8 @@ class Retouch:
             glow = cv2.GaussianBlur(out, (0, 0), sigma * 2.5)
             out = out + (np.maximum(glow, out) - out) * 0.35 * s["plump"]
 
-        if s["eyes"] > 0.01:
-            out = out + (255 - out) * 0.12 * s["eyes"] * eye_m[:, :, None]
+        # NOTE: eye brightening is applied AFTER the skin blend, at the bottom —
+        # see the comment there (REN-177).
 
         if s["circles"] > 0.01:
             plate = cv2.medianBlur(np.clip(out, 0, 255).astype(np.uint8),
@@ -540,12 +574,17 @@ class Retouch:
             lift = np.clip(plate * 1.06 + 6, 0, 255)
             out = out + (lift - out) * 0.6 * s["circles"] * under_m[:, :, None]
 
-        # blend through the skin mask, PLUS the eye regions when eye brightening
-        # is on (eyes are excluded from the skin mask, so without this the eyes
-        # op would be zeroed by the final blend)
-        blend_m = m3
+        # The SKIN work lands through the skin mask only.
+        blended = src * (1 - m3) + out * m3
+
+        # THEN the eyes, on their own (REN-177). They used to be folded into the
+        # same blend by widening the mask to cover them — which handed the eye
+        # region every other operation as well, so with all the sliders at 100
+        # the glow and the de-shine lift landed on the whites and turned them
+        # into flat discs. An eye lift is its own small thing.
         if s["eyes"] > 0.01:
-            blend_m = np.clip(mask + eye_m, 0, 1)[:, :, None]
-        blended = src * (1 - blend_m) + out * blend_m
+            e = eye_m[:, :, None]
+            blended = blended + (255 - blended) * 0.10 * s["eyes"] * e
+
         frame[y0:y1, x0:x1] = np.clip(blended, 0, 255).astype(np.uint8)
         return frame

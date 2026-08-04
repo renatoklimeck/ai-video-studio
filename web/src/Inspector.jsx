@@ -43,12 +43,17 @@ function MaxWField({ value, onLive, onFocus }) {
 
 // scope 'all' by default (REN-162): a face is the same face in every take, so
 // retouching one clip and not the rest is almost never what he means.
-const RT_NATURAL = { preset: 'natural', intensity: 35, smooth: 30, even: 25, blem: 20, shine: 15, plump: 10, eyes: 20, circles: 10, dewrinkle: 20, scope: 'all' }
-const RT_STUDIO = { preset: 'studio', intensity: 60, smooth: 55, even: 45, blem: 40, shine: 30, plump: 25, eyes: 35, circles: 25, dewrinkle: 40, scope: 'all' }
-// On activate everything is zeroed (Renato's ask) EXCEPT Intensity, which is the
-// master scale — 50 = neutral so moving any fine-tune from 0 shows immediately.
-// Nothing changes on screen until a fine-tune leaves 0. ↺ resets to this.
-const RT_ZERO = { preset: 'custom', intensity: 50, smooth: 0, even: 0, blem: 0, shine: 0, plump: 0, eyes: 0, circles: 0, dewrinkle: 0, scope: 'all' }
+//
+// Intensity is now a plain trim and opens at 100 (REN-177). It used to open at
+// 50 and the engine scaled by 0.4 + 0.6*(intensity/100), so a fine-tune set to
+// 100 quietly delivered 70 — part of why the sliders felt like they did
+// nothing. The presets are set higher for the same reason: at the old numbers
+// "Natural" changed the skin by less than 1%.
+const RT_NATURAL = { preset: 'natural', intensity: 100, smooth: 45, even: 40, blem: 45, shine: 25, plump: 10, eyes: 15, circles: 20, dewrinkle: 30, scope: 'all' }
+const RT_STUDIO = { preset: 'studio', intensity: 100, smooth: 80, even: 70, blem: 80, shine: 45, plump: 20, eyes: 25, circles: 40, dewrinkle: 55, scope: 'all' }
+// On activate everything is zeroed (Renato's ask): nothing changes on screen
+// until a fine-tune leaves 0. ↺ resets to this.
+const RT_ZERO = { preset: 'custom', intensity: 100, smooth: 0, even: 0, blem: 0, shine: 0, plump: 0, eyes: 0, circles: 0, dewrinkle: 0, scope: 'all' }
 
 // A clip is PINNED when its scope is 'clip': he set that clip on purpose, and a
 // global change must never overwrite it.

@@ -86,8 +86,9 @@ captions/texts/overlays/audios são segundos de **TIMELINE** (não da fonte).
   },
   "rt": {                        // face retouch (null = off)
     "preset": "natural",         // "natural" | "studio" | "custom"
-    "intensity": 50,             // 0–100, mestre — escala o efeito todo (default 50
-                                 // ao ativar; fine-tunes começam em 0)
+    "intensity": 100,            // 0–100, mestre — TRIM puro (m = intensity/100).
+                                 // Abre em 100 para o slider valer o que diz;
+                                 // fine-tunes começam em 0 (REN-177)
     "smooth": 30, "even": 25, "blem": 20, "dewrinkle": 20, "shine": 15,
     "plump": 10, "eyes": 20, "circles": 10,   // fine-tune 0–100
                                  // dewrinkle (REN-160): levanta LINHAS escuras na
