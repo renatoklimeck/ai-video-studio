@@ -116,11 +116,21 @@ class Retouch:
         # smudge next to his eyebrow (REN-170). Judge against THIS face instead:
         # anything far from the median colour of what is already masked is not
         # his skin, whatever the generic range says.
+        #
+        # A SPECULAR HIGHLIGHT IS STILL SKIN (REN-176). It has almost no colour,
+        # so it fails a chroma test badly — and the first version of this cut a
+        # hole straight through his forehead, one of the places that most needs
+        # evening out. Bright pixels well inside the oval are kept regardless.
         sel = mask > 0
         if sel.sum() > 500:
             med = np.median(ycrcb[sel].reshape(-1, 3), axis=0)
             d = np.abs(ycrcb.astype(np.float32) - med)
-            near = ((d[:, :, 1] < 12) & (d[:, :, 2] < 12)).astype(np.uint8) * 255
+            near = ((d[:, :, 1] < 18) & (d[:, :, 2] < 18)).astype(np.uint8) * 255
+            inner = np.zeros((h, w), np.uint8)
+            cv2.ellipse(inner, (int(fx + fw / 2), int(fy + fh * 0.50)),
+                        (int(fw * 0.48), int(fh * 0.58)), 0, 0, 360, 255, -1)
+            bright = ((ycrcb[:, :, 0].astype(np.float32) > med[0]) & (inner > 0))
+            near[bright] = 255
             mask = cv2.bitwise_and(mask, near)
 
         er = max(4, int(fw * 0.14))
@@ -135,17 +145,29 @@ class Retouch:
             cv2.ellipse(mask, (int(mouth[0]), int(mouth[1])),
                         (int(fw * 0.24), int(fh * 0.11)), 0, 0, 360, 0, -1)
 
-        # protect high-detail edges (brows, lashes, hairline, glasses)
+        k = max(3, int(fw * 0.06)) | 1
+        skin_f = cv2.GaussianBlur(mask, (k, k), 0).astype(np.float32) / 255.0
+
+        # EDGES ARE DAMPENED, NOT DELETED (REN-176).
+        #
+        # This used to be `mask[dilate(mag > 110)] = 0`, which zeroed the skin
+        # around ANY detail. Measured on his own face that left the retouch
+        # reaching 48% of the face oval — the nose, the mouth, the whole beard
+        # region and even the forehead highlight got nothing, whatever the
+        # sliders said, which is most of why the feature felt weak and patchy.
+        #
+        # That defence was written for a chain that smoothed the whole image.
+        # This one only touches the LOW band and hands back 88-90% of the
+        # texture, so a lash sitting inside the mask survives on its own. What
+        # is left here is a soft hold-back on genuinely strong edges — enough
+        # to keep a hairline from bleeding, without carving holes in the face.
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
         gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
         mag = cv2.magnitude(gx, gy)
-        edges = (mag > 110).astype(np.uint8) * 255
-        edges = cv2.dilate(edges, np.ones((3, 3), np.uint8))
-        mask[edges > 0] = 0
-
-        k = max(3, int(fw * 0.06)) | 1
-        skin_f = cv2.GaussianBlur(mask, (k, k), 0).astype(np.float32) / 255.0
+        mag = cv2.GaussianBlur(mag, (0, 0), max(1.5, fw / 120.0))
+        hold = np.clip((mag - 190.0) / 150.0, 0, 1)
+        skin_f = skin_f * (1.0 - 0.85 * hold)
         ke = max(3, int(fw * 0.05)) | 1
         eye_m = cv2.GaussianBlur(eye_m, (ke, ke), 0)
         under_m = cv2.GaussianBlur(under_m, (ke, ke), 0)
