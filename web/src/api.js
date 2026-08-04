@@ -52,10 +52,6 @@ export const api = {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ clipId }),
   }).then(j),
-  retouch: (pid, clipId) => fetch(`/api/project/${pid}/retouch`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ clipId }),
-  }).then(j),
   facedetect: (pid, path) => fetch(`/api/project/${pid}/facedetect`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path }),
@@ -111,13 +107,6 @@ export const api = {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ src }),
   }).then(j),
-  // ONE frame through the real retouch pipeline (REN-161) — a blob URL, so the
-  // caller must revoke it
-  rtFrame: (pid, path, t, rt, w, signal) =>
-    fetch(`/api/project/${pid}/rt_frame`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path, t, rt, w }), signal,
-    }).then((r) => { if (!r.ok) throw new Error(r.status); return r.blob() }),
   chat: (pid) => fetch(`/api/project/${pid}/chat`).then(j),
   chatSend: (pid, message, model, effort, preset) => fetch(`/api/project/${pid}/chat`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },

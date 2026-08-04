@@ -51,7 +51,7 @@ const wrapSafe = (text) => String(text ?? '').split('\n').flatMap((line, li) => 
 export default function Player({ s, onImportVideo }) {
   const { project: p, playing, setPlaying, sel, setSel,
           mutate, beginGesture, fullscreen, setFullscreen, compare, setCompare,
-          isMobile, processBg, inlineEdit, setInlineEdit, faceTracks, rtSig,
+          isMobile, processBg, inlineEdit, setInlineEdit,
           showToast } = s
   const time = useTimeValue()
   const frameRef = useRef(null)
@@ -67,8 +67,6 @@ export default function Player({ s, onImportVideo }) {
   const cacheRefs = useRef({})
   const ovRefs = useRef({})
   const audRefs = useRef({})
-  const rtRefs = useRef({})          // clip id -> processed-retouch preview video
-  const rtLiveRef = useRef(null)     // live face-masked approximation layer
   const projRef = useRef(p)
   const engineRef = useRef({ ci: -1, el: null })
   const armedRef = useRef({ el: null, ci: -1 })   // buffer already rolling for the next cut
@@ -144,30 +142,21 @@ export default function Player({ s, onImportVideo }) {
   const cacheFresh = (c) => c.bg?.processed && !c.bg.stale && c.bg._cache &&
     c.bg._cache.in === c.in && c.bg._cache.out === c.out && c.bg._cache.path
 
-  // processed face-retouch preview for this clip is usable (REN-84)
-  const rtCacheFresh = (c) => {
-    const rc = c.rt?._cache
-    return !!(c.rt?.processed && !c.rt.stale && rc && rc.path &&
-      rc.in === c.in && rc.out === c.out && rc.sig === rtSig(c.rt))
-  }
-
   // Which video element supplies the clip's base image, and how its currentTime
-  // maps to timeline time. Processed caches (bg/retouch) are standalone clips
+  // maps to timeline time. The bg cache is a standalone clip
   // ([in,out] rendered to 0-based files), so their time is clip-relative;
   // the raw source is absolute (c.in + rel). "compare" hold falls back to the
-  // untouched source so the retouch/bg preview can be checked against original.
+  // untouched source so the bg preview can be checked against the original.
   // compareRef (not the compare prop) so the running engine sees toggles without
   // being torn down and rebuilt — tick swaps the base element in place instead
   function pick(c) {
-    if (!compareRef.current && rtCacheFresh(c) && rtRefs.current[c.id])
-      return { el: rtRefs.current[c.id], cache: true, kind: 'rt' }
     if (!compareRef.current && cacheFresh(c) && cacheRefs.current[c.id])
       return { el: cacheRefs.current[c.id], cache: true, kind: 'bg' }
     return { el: srcEl(c.src || 'main'), cache: false, kind: 'src' }
   }
   const allBaseEls = () => [
     ...Object.values(srcRefs.current), ...Object.values(srcRefsB.current),
-    ...Object.values(cacheRefs.current), ...Object.values(rtRefs.current),
+    ...Object.values(cacheRefs.current),
   ]
   function showOnly(activeEl) {
     for (const el of allBaseEls()) {
@@ -214,28 +203,11 @@ export default function Player({ s, onImportVideo }) {
     if (!sinkSupported) return
     // the context only exists when a clip needed >100% volume; keep it in step
     audioCtxRef.current?.setSinkId?.(sinkId).catch(() => {})
-    for (const el of [...allBaseEls(), rtLiveRef.current,
+    for (const el of [...allBaseEls(),
                       ...Object.values(ovRefs.current), ...Object.values(audRefs.current)]) {
       if (el) { el._vsSink = undefined; routeSink(el) }
     }
   }, [sinkId])
-
-  // interpolated normalized face box at the playhead (for the live mask)
-  function faceBoxAt(c, srcT) {
-    const tr = faceTracks?.[c.src || 'main']
-    const sm = tr?.samples
-    if (!sm || !sm.length) return null
-    let lo = sm[0], hi = sm[sm.length - 1]
-    for (let i = 0; i < sm.length; i++) {
-      if (sm[i].t <= srcT) lo = sm[i]
-      if (sm[i].t >= srcT) { hi = sm[i]; break }
-    }
-    // only trust the box when a sample is reasonably near (face present here)
-    if (Math.min(Math.abs(lo.t - srcT), Math.abs(hi.t - srcT)) > 0.6) return null
-    const p = hi.t === lo.t ? 0 : (srcT - lo.t) / (hi.t - lo.t)
-    const lerp = (a, b) => a + (b - a) * p
-    return { x: lerp(lo.x, hi.x), y: lerp(lo.y, hi.y), w: lerp(lo.w, hi.w), h: lerp(lo.h, hi.h) }
-  }
 
   function clipFade(c, rel) {
     const d = c.out - c.in
@@ -278,7 +250,7 @@ export default function Player({ s, onImportVideo }) {
     if (!el) return
     // Every element that produces sound comes through here, including ones that
     // mount long after the sink effect ran (overlay videos are time-gated and
-    // remount as the playhead crosses them; a bg/retouch cache appears when its
+    // remount as the playhead crosses them; a bg cache appears when its
     // job finishes). Routing here instead of in an effect is what makes the
     // picker actually cover them.
     routeSink(el)
@@ -332,13 +304,6 @@ export default function Player({ s, onImportVideo }) {
     }
   }
 
-  // live retouch approximation follows the source at source-time (only mounted
-  // when the base is the raw source, so it can never fight a processed swap)
-  function syncLive(srcT, isPlaying) {
-    const el = rtLiveRef.current
-    if (el) syncEl(el, srcT, isPlaying)
-  }
-
   // Full pass used while PAUSED (scrub / frame-step / project reload)
   function syncAll(t) {
     const proj = projRef.current
@@ -348,7 +313,6 @@ export default function Player({ s, onImportVideo }) {
     const { el, cache } = pick(c)
     showOnly(el)
     if (el) syncEl(el, cache ? t - clipOutStart(proj, i) : srcT, false)
-    syncLive(srcT, false)
     syncSecondary(t, false)
   }
 
@@ -389,8 +353,7 @@ export default function Player({ s, onImportVideo }) {
       // finish fetching and decoding; arm() then only has to press play.
       const nx = proj.clips[i + 1]
       if (nx) {
-        const nxCache = (!compareRef.current && rtCacheFresh(nx) && rtRefs.current[nx.id])
-          || (!compareRef.current && cacheFresh(nx) && cacheRefs.current[nx.id]) || null
+        const nxCache = ((!compareRef.current && cacheFresh(nx) && cacheRefs.current[nx.id]) || null)
         const idle = nxCache || srcEl(nx.src || 'main', bufRef.current ? 0 : 1)
         // never touch what is on screen, never scrub one already armed
         if (idle && idle !== el && idle !== armedRef.current.el) {
@@ -401,11 +364,6 @@ export default function Player({ s, onImportVideo }) {
           if (Math.abs(idle.currentTime - to) > EDGE_EPS) idle.currentTime = to
           parkedRef.current = { el: idle, ci: i + 1, to }
         }
-      }
-      const live = rtLiveRef.current
-      if (live) {
-        if (Math.abs(live.currentTime - (c.in + rel)) > EDGE_EPS * 2) live.currentTime = c.in + rel
-        live.play().catch(() => {})
       }
     }
 
@@ -425,8 +383,7 @@ export default function Player({ s, onImportVideo }) {
       // OTHER source buffer — the buffers swap at the cut, so pick() (which
       // resolves against the CURRENT buffer) would hand back the element that
       // is on screen right now and arming would scrub the live picture.
-      const cacheEl = (!compareRef.current && rtCacheFresh(nx) && rtRefs.current[nx.id])
-        || (!compareRef.current && cacheFresh(nx) && cacheRefs.current[nx.id]) || null
+      const cacheEl = ((!compareRef.current && cacheFresh(nx) && cacheRefs.current[nx.id]) || null)
       const el = cacheEl || srcEl(nx.src || 'main', bufRef.current ? 0 : 1)
       if (!el || el === engineRef.current.el) return
       armedRef.current = { el, ci: i + 1 }
@@ -444,7 +401,7 @@ export default function Player({ s, onImportVideo }) {
 
     // Park the idle buffer on the next clip's first frame while this one plays,
     // so the swap at the cut costs nothing. Clips with their own processed
-    // element (bg / retouch cache) already have a dedicated <video> and never
+    // element (the bg cache) already has a dedicated <video> and never
     // stalled, so they need no prefetch.
     const stop = () => {
       if (stopped) return
@@ -483,8 +440,7 @@ export default function Player({ s, onImportVideo }) {
         const j = i + 1
         if (j < proj.clips.length) {
           const nc = proj.clips[j]
-          const nxCache = (!compareRef.current && rtCacheFresh(nc) && rtRefs.current[nc.id])
-            || (!compareRef.current && cacheFresh(nc) && cacheRefs.current[nc.id]) || null
+          const nxCache = ((!compareRef.current && cacheFresh(nc) && cacheRefs.current[nc.id]) || null)
           const inc = nxCache || srcEl(nc.src || 'main', bufRef.current ? 0 : 1)
           const tb = clipOutStart(proj, j)
           // Swapping onto a buffer that cannot paint IS the freeze. Rather than
@@ -497,7 +453,6 @@ export default function Player({ s, onImportVideo }) {
             if (performance.now() - gateRef.current < HOLD_MAX * 1000) {
               timeStore.set(tb)               // clock, captions and overlays keep moving
               setVol(el, clipFade(c, cDur) * (c.vol ?? 1) * (muteRef.current.video ? 0 : 1))
-              syncLive(c.in + rel, true)
               syncSecondary(tb, true)
               return
             }
@@ -514,7 +469,6 @@ export default function Player({ s, onImportVideo }) {
       const t = clipOutStart(proj, i) + Math.max(0, rel)
       timeStore.set(t)
       setVol(el, clipFade(c, rel) * (c.vol ?? 1) * (muteRef.current.video ? 0 : 1))
-      syncLive(c.in + rel, true)
       syncSecondary(t, true)
     }
 
@@ -535,7 +489,7 @@ export default function Player({ s, onImportVideo }) {
       armedRef.current = { el: null, ci: -1 }
       parkedRef.current = { el: null, ci: -1, to: 0 }
       gateRef.current = 0
-      for (const el of [...allBaseEls(), rtLiveRef.current,
+      for (const el of [...allBaseEls(),
                         ...Object.values(ovRefs.current), ...Object.values(audRefs.current)]) {
         if (el && !el.paused) el.pause()
       }
@@ -907,83 +861,7 @@ export default function Player({ s, onImportVideo }) {
     transformOrigin: `${zoom.cx * 100}% ${zoom.cy * 100}%`,
   } : {}
 
-  // Live retouch approximation (REN-84): a face-MASKED CSS filter on a duplicate
-  // source layer — every slider contributes a term so each one visibly responds,
-  // scaled by the same master m the export uses; masked to the tracked face so
-  // the rest of the frame is untouched. The accurate path is "Process" (real
-  // pipeline, swapped in via rtCacheFresh). "compare" hides it.
-  const rt = clip?.rt
-  const rtLiveOn = !!rt && !compare && !rtCacheFresh(clip) && pick(clip).kind === 'src'
-  const rtSrcT = clip ? clip.in + (time - clipStart) : 0
-  const faceBox = rtLiveOn ? faceBoxAt(clip, rtSrcT) : null
-  function retouchFilter(r) {
-    const m = 0.4 + 0.6 * (r.intensity ?? 0) / 100
-    const g = (k) => (r[k] ?? 0) / 100 * m
-    // dewrinkle (REN-160) reads as a small extra softening plus a lift: the
-    // real pipeline only touches dark LINES, which CSS cannot express, so this
-    // approximates the direction of the change, not its selectivity
-    const blur = (g('smooth') * 1.4 + g('dewrinkle') * 0.5).toFixed(2)
-    const sat = (1 - 0.18 * g('even') + 0.06 * g('plump')).toFixed(3)
-    const bright = (1 + 0.05 * g('plump') + 0.07 * g('eyes') + 0.05 * g('circles')
-                    + 0.03 * g('dewrinkle') - 0.05 * g('shine')).toFixed(3)
-    const contrast = (1 - 0.05 * g('blem') - 0.04 * g('even') - 0.03 * g('dewrinkle')).toFixed(3)
-    return `blur(${blur}px) saturate(${sat}) brightness(${bright}) contrast(${contrast})`
-  }
-  const faceMask = faceBox ? (() => {
-    const grad = `radial-gradient(ellipse ${(faceBox.w * 62).toFixed(1)}% ${(faceBox.h * 82).toFixed(1)}%` +
-      ` at ${(faceBox.x * 100).toFixed(1)}% ${(faceBox.y * 100).toFixed(1)}%, #000 55%, transparent 100%)`
-    return { WebkitMaskImage: grad, maskImage: grad }
-  })() : null
-
-  // THE REAL PIPELINE, ON THE FRAME HE IS LOOKING AT (REN-161).
-  //
-  // "Process retouch preview" renders the whole clip, which is why it needed a
-  // button and a wait. While paused, nothing on screen needs more than this one
-  // frame — so it is fetched automatically whenever a slider moves. The CSS
-  // approximation above stays for playback, where a round trip per frame could
-  // never keep up.
-  //
-  // Measured on this machine: seek+decode 35 ms (cached server-side after the
-  // first request at an instant), face detection 7.8 ms, filter chain 132 ms at
-  // his own setting and 246 ms with every slider at 100.
-  const [guides, setGuides] = useState([])     // alignment lines while dragging
-  const [rtShot, setRtShot] = useState(null)   // { url, sig }
-  const rtShotReq = useRef(null)
-  const rtLastSig = useRef(null)
-  const rtWantSig = rt && !compare && !playing && pick(clip).kind === 'src'
-    ? `${clip.id}|${rtSrcT.toFixed(2)}|${s.rtSig(rt)}`
-    : null
-  useEffect(() => {
-    if (!rtWantSig) { setRtShot(null); return undefined }
-    let dead = false
-    // While a slider is MOVING, ask for a smaller frame — it comes back sooner
-    // and he is watching the change, not the detail. The moment it settles,
-    // the same instant is fetched at full preview width (REN-175).
-    const sliderMoved = rtLastSig.current && rtLastSig.current.split('|')[2] !== rtWantSig.split('|')[2]
-    rtLastSig.current = rtWantSig
-    const shoot = async (w) => {
-      rtShotReq.current?.abort()
-      const ac = new AbortController()
-      rtShotReq.current = ac
-      const srcObj = p.sources?.[clip.src || 'main'] || {}
-      const blob = await api.rtFrame(s.currentId, srcObj.proxy || srcObj.path,
-                                     rtSrcT, rt, w, ac.signal)
-      if (dead) return
-      setRtShot((old) => {
-        if (old?.url) URL.revokeObjectURL(old.url)
-        return { url: URL.createObjectURL(blob), sig: rtWantSig }
-      })
-    }
-    const quick = setTimeout(() => {
-      shoot(sliderMoved ? 420 : 720).catch(() => {})
-    }, sliderMoved ? 40 : 90)
-    // the sharp one, once he stops moving
-    const sharp = setTimeout(() => { shoot(720).catch(() => {}) }, 320)
-    return () => { dead = true; clearTimeout(quick); clearTimeout(sharp) }
-  }, [rtWantSig]) // eslint-disable-line react-hooks/exhaustive-deps
-  // release the last blob when the card closes or the clip changes
-  useEffect(() => () => { rtShotReq.current?.abort() }, [])
-  const rtShotOn = !!rtShot && rtShot.sig === rtWantSig
+  const [guides, setGuides] = useState([])     // alignment lines while dragging (REN-154)
   const activeSrcObj = clip ? (p.sources?.[clip.src || 'main'] || null) : null
 
   const veil = clip ? 1 - clipFade(clip, time - clipStart) : 0
@@ -1070,39 +948,6 @@ export default function Player({ s, onImportVideo }) {
                      playsInline preload="auto"
                      style={{ opacity: 0 }} />
             ))}
-            {(p.clips || []).filter((c) => c.rt?._cache?.path).map((c) => (
-              <video key={c.id} ref={(el) => { rtRefs.current[c.id] = el }}
-                     src={fileUrl(p, c.rt._cache.path)}
-                     playsInline preload="auto"
-                     style={{ opacity: 0 }} />
-            ))}
-            {/* live face-masked retouch approximation — one duplicate of the
-                active source, filtered and clipped to the tracked face */}
-            {rtLiveOn && (
-              // kept mounted across detection gaps (just hidden) so it never
-              // remounts to currentTime 0 and flashes the source's first frame
-              <video ref={rtLiveRef} key={`rtlive-${clip.src || 'main'}`}
-                     src={fileUrl(p, activeSrcObj?.proxy || activeSrcObj?.path)}
-                     playsInline preload="auto" muted
-                     style={{ filter: retouchFilter(rt), ...(faceMask || {}),
-                                // ABOVE the source, or none of this is visible.
-                                // showOnly() gives the active base video z-index 1
-                                // and this sibling had z-index auto, which paints
-                                // UNDER it — so the opaque untouched source covered
-                                // the only layer that reacts to the sliders. That is
-                                // the whole reason face retouch looked dead: moving a
-                                // slider also marks the processed cache stale, which
-                                // drops the preview back to the raw source, with its
-                                // replacement hidden underneath.
-                                zIndex: 2,
-                                opacity: faceBox ? 1 : 0 }} />
-            )}
-            {/* the real pipeline on this frame — sits above the approximation */}
-            {rtShotOn && (
-              <img src={rtShot.url} alt="" draggable={false}
-                   style={{ position: 'absolute', inset: 0, width: '100%', height: '100%',
-                            objectFit: 'cover', zIndex: 3, pointerEvents: 'none' }} />
-            )}
           </div>
 
           {/* video track hidden → black frame, other elements still on top */}
@@ -1112,7 +957,7 @@ export default function Player({ s, onImportVideo }) {
           <div className="vignette" />
           {clip && (
             <div className="take-chip">
-              take {ci + 1} · {pickKind === 'rt' ? 'retouch preview' : pickKind === 'bg' ? 'bg preview'
+              take {ci + 1} · {pickKind === 'bg' ? 'bg preview'
                 : activeSrc?.proxy ? 'proxy 720p' : 'full-res source'}
             </div>
           )}
@@ -1125,9 +970,6 @@ export default function Player({ s, onImportVideo }) {
               <span>{g.label}</span>
             </div>
           ))}
-          {rtShotOn
-            ? <div className="rt-chip">● retouch · live</div>
-            : rtLiveOn && faceBox && <div className="rt-chip">◐ retouch · approximate while playing</div>}
 
           {visOverlays.map((o) => {
             const a = itemAlpha(time, o.t0, o.t1 ?? dur, o.fadeIn, o.fadeOut)
@@ -1254,7 +1096,7 @@ export default function Player({ s, onImportVideo }) {
             </div>
           )}
 
-          {rt && (
+          {clip?.bg && (
             <div className="compare-pill"
                  onPointerDown={(e) => { e.stopPropagation(); e.preventDefault(); setCompare(true) }}
                  onPointerUp={() => setCompare(false)}

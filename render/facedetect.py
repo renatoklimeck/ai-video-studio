@@ -1,7 +1,7 @@
 """Face track for a source video (REN-84): sample YuNet across the media and
-write a normalized bbox track, so the web preview can (a) show an honest
-"face detected / no face" chip per clip and (b) mask the live retouch
-approximation to the face region.
+write a normalized bbox track, so the app can (a) show an honest
+"face detected / no face" chip per clip and (b) centre Auto zoom's punch-in on
+the face instead of on the middle of the frame.
 
 The client passes the 720p PROXY when available (fast keyframe seeks, GOP 15),
 so we sample by SEEKING to each timestamp instead of decoding every frame —

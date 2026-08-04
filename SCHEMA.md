@@ -84,25 +84,13 @@ captions/texts/overlays/audios são segundos de **TIMELINE** (não da fonte).
     "stale": false,              // clipe editado depois do processamento
     "_cache": { "path": "cache/segbg_c1.mp4", "in": 0.0, "out": 5.2 }  // interno
   },
-  "rt": {                        // face retouch (null = off)
-    "preset": "natural",         // "natural" | "studio" | "custom"
-    "intensity": 100,            // 0–100, mestre — TRIM puro (m = intensity/100).
-                                 // Abre em 100 para o slider valer o que diz;
-                                 // fine-tunes começam em 0 (REN-177)
-    "smooth": 30, "even": 25, "blem": 20, "dewrinkle": 20, "shine": 15,
-    "plump": 10, "eyes": 20, "circles": 10,   // fine-tune 0–100
-                                 // dewrinkle (REN-160): levanta LINHAS escuras na
-                                 // banda entre poro e sombra; poro fica intacto
-    "scope": "all",              // "all" (default) | "clip"
-                                 // "clip" = fixado: uma mudança global NÃO o
-                                 // sobrescreve. Só apertar "All clips" o toma.
-    "processed": true,           // preview processado (real pipeline) disponível
-    "stale": false,              // clipe/sliders mudaram depois do processamento
-    "_cache": { "path": "cache/retouch_c1.mp4", "in": 0.0, "out": 5.2,
-                "sig": "50,30,25,20,20,15,10,20,10" }  // interno · in/out/sig p/ validar frescor
-                                 // sig segue RT_KEYS em store.js — um slider fora
-                                 // dessa lista deixa o preview processado velho
-  }
+  "rt": { … }                    // FACE RETOUCH: REMOVIDO DO APP em 2026-08-04.
+                                 // O bloco continua nos project.json e NÃO é
+                                 // apagado — nada do que ele ajustou se perdeu.
+                                 // O renderer e a UI simplesmente não o leem.
+                                 // render/retouch.py segue no repo; voltar é
+                                 // religar o card do Inspector e duas linhas do
+                                 // renderer, não reescrever o motor.
 }
 ```
 

@@ -41,80 +41,17 @@ function MaxWField({ value, onLive, onFocus }) {
   )
 }
 
-// scope 'all' by default (REN-162): a face is the same face in every take, so
-// retouching one clip and not the rest is almost never what he means.
+// Face retouch was REMOVED from the app on 2026-08-04, at Renato's call after
+// four rounds that never looked good enough to ship. The presets, the sliders,
+// the scope rules and the spread guard all lived here.
 //
-// Intensity is now a plain trim and opens at 100 (REN-177). It used to open at
-// 50 and the engine scaled by 0.4 + 0.6*(intensity/100), so a fine-tune set to
-// 100 quietly delivered 70 — part of why the sliders felt like they did
-// nothing. The presets are set higher for the same reason: at the old numbers
-// "Natural" changed the skin by less than 1%.
-const RT_NATURAL = { v: 2, preset: 'natural', intensity: 100, smooth: 45, even: 40, blem: 45, shine: 25, plump: 10, eyes: 15, circles: 20, dewrinkle: 30, scope: 'all' }
-const RT_STUDIO = { v: 2, preset: 'studio', intensity: 100, smooth: 80, even: 70, blem: 80, shine: 45, plump: 20, eyes: 25, circles: 40, dewrinkle: 55, scope: 'all' }
-// Everything at zero. Only reachable through ↺ now — see the checkbox.
-const RT_ZERO = { v: 2, preset: 'custom', intensity: 100, smooth: 0, even: 0, blem: 0, shine: 0, plump: 0, eyes: 0, circles: 0, dewrinkle: 0, scope: 'all' }
-
-// SMOOTH SKIN IS THE FEATURE; the rest are trims (REN-192).
-//
-// Turning the card on used to zero everything, so the box did nothing until he
-// found the right slider — and he never did. His saved clips read
-// `smooth: 0, even: 100, blem: 100, dewrinkle: 99`: five maxed-out sliders that
-// are all LOCAL by nature (a blemish, a line, a highlight) and the one that
-// resurfaces the whole face left at zero. Measured on his frame, that setting
-// leaves the skin's unevenness at 99% of the original and shifts the colour a
-// little — which is exactly, word for word, what he reported seeing four times.
-//
-// So the checkbox now applies Natural. It is a retouch; it should retouch.
-const RT_ON = RT_NATURAL
-
-// A clip is PINNED when its scope is 'clip': he set that clip on purpose, and a
-// global change must never overwrite it.
-//
-// The 2026-08-04 attempt lost work exactly here — it made the presets default to
-// scope 'all' and then had every slider move copy the look over EVERY other
-// clip unconditionally, so one drag erased a clip he had tuned by hand. The
-// guard, not the default, is the hard part.
-export const rtPinned = (c) => !!c.rt && c.rt.scope === 'clip'
-
-// `force` is the difference between him ASKING and him not asking.
-//
-//   force=false — a slider moved while the scope happens to be "all". Clips he
-//                 pinned to "This clip" are left alone; taking them over would
-//                 be work destroyed by a gesture he did not aim at them.
-//   force=true  — he pressed "All clips". That IS the instruction, so it lands
-//                 on every clip, pinned or not (and undo puts it back).
-//
-// Existing projects are why force exists: every clip in them carries the old
-// scope:'clip' default, so without it the button would silently do nothing.
-export function spreadRt(c, pp, force = false) {
-  const { _cache, processed, stale, ...tune } = c.rt   // look only, never cache/preview state
-  let n = 0
-  for (const o of pp.clips || []) {
-    if (o.id === c.id || (!force && rtPinned(o))) continue
-    o.rt = { ...structuredClone(tune), scope: 'all' }
-    n++
-  }
-  return n
-}
-// NOTE: the signature that decides whether a processed preview is still fresh
-// lives in store.js and is used from `s.rtSig`. It used to be duplicated here,
-// and adding a slider to one copy and not the other means a change he can see
-// on the sliders leaves a stale "✓ processed" preview on screen.
-// Smooth skin is shown on its own, ABOVE the fine-tunes: it is the one that
-// resurfaces the whole face, and buried in a list of eight it read as just
-// another trim (REN-192). The rest only touch what their name says — a
-// blemish, a line, a highlight — so maxing all of them and leaving this at 0
-// changes almost nothing, which is what happened.
-const RT_SLIDERS = [
-  ['even', 'Even tone'], ['blem', 'Clear blemishes'],
-  ['dewrinkle', 'Dewrinkle'], ['shine', 'De-shine'], ['plump', 'Plump'],
-  ['eyes', 'Brighten eyes'], ['circles', 'Dark circles'],
-]
+// The `rt` block stays in every project.json untouched — nothing he tuned is
+// lost — and render/retouch.py is still in the repo. Bringing it back is
+// re-wiring this card and two lines in the renderer, not rewriting the engine.
 
 export default function Inspector({ s }) {
   const { project: p, sel, setSel, mutate, beginGesture, deleteSel, isMobile,
-          bgJob, bgJobPct, bgJobAll, processBg, currentId,
-          rtJob, rtJobPct, processRt, faceTracks, detectFace } = s
+          bgJob, bgJobPct, bgJobAll, processBg, currentId } = s
   const bgImgRef = useRef(null)
   const capSpanRef = useRef(null)
   const [capDraft, setCapDraft] = useState(null)
@@ -147,8 +84,6 @@ export default function Inspector({ s }) {
   const editClipStale = (fn, undoable = true) => edit((c, pp) => {
     fn(c, pp)
     if (c.bg?.processed) c.bg.stale = true
-    // a bg param change also invalidates the retouch preview (it composites bg)
-    if (c.rt?.processed) c.rt.stale = true
   }, undoable)
   const editClipStaleLive = (fn) => editClipStale(fn, false)
 
@@ -171,42 +106,7 @@ export default function Inspector({ s }) {
     editClipStale((c) => { if (c.bg) c.bg.image = path })
   }
 
-  const rt = hasSel && sel.type === 'clip' ? item.rt : null
-  const rtStrong = rt && RT_SLIDERS.some(([k]) => rt[k] > 40)
-  const setRt = (field) => (e) => {
-    const v = parseInt(e.target.value, 10) || 0
-    editLive((c, pp) => {
-      if (!c.rt) return
-      // Touching a slider brings a pre-REN-177 clip into the new meaning of
-      // Intensity, converted so it looks EXACTLY the same at that moment
-      // (old m = 0.4 + 0.6·i/100, new m = i/100). Without this his older clips
-      // would stay quietly at 70% of what their numbers say.
-      if ((c.rt.v ?? 1) < 2) {
-        c.rt.intensity = Math.round(40 + 0.6 * (c.rt.intensity ?? 50))
-        c.rt.v = 2
-      }
-      c.rt[field] = v
-      c.rt.preset = 'custom'
-      if (c.rt.processed) c.rt.stale = true // tuning invalidates the processed preview
-      // while the scope is "all", the slider IS the whole video's look — but
-      // never touches a clip he pinned to itself (REN-162)
-      if (c.rt.scope === 'all') spreadRt(c, pp)
-    })
-  }
-  // how many OTHER clips are pinned to their own retouch — so the rule is
-  // visible instead of silent (REN-162)
-  const pinnedCount = (p.clips || []).filter((o) => o.id !== item?.id && rtPinned(o)).length
   const bgClipCount = (p.clips || []).filter((o) => o.bg).length   // REN-163
-  // real face detection for the honest chip + live mask (runtime only)
-  const rtSrc = rt ? (item.src || 'main') : null
-  useEffect(() => {
-    if (rtSrc) detectFace(rtSrc)
-  }, [rtSrc, detectFace])
-  const track = rtSrc ? faceTracks[rtSrc] : null
-  const faceInClip = track && (track.samples || []).some((sp) => sp.t >= item.in && sp.t <= item.out)
-  const rtFresh = rt && rt.processed && !rt.stale && rt._cache &&
-    rt._cache.sig === s.rtSig(rt) && rt._cache.in === item.in && rt._cache.out === item.out
-
   // caption audio span — source seconds for source-anchored groups (REN-115),
   // timeline seconds for legacy
   const capSrc = hasSel && sel.type === 'cap' && item.capAnchor === 'source'
@@ -312,9 +212,8 @@ export default function Inspector({ s }) {
                     <div className="insp-hint" style={{ cursor: 'pointer' }}
                          onClick={() => editClipStale((c) => { c.bg.image = null })}>✕ remove background image</div>
                   )}
-                  {/* apply this background to every clip, like face retouch
-                      (REN-163). Copies the LOOK only — each clip renders its
-                      own preview file. */}
+                  {/* apply this background to every clip (REN-163).
+                      Copies the LOOK only — each clip renders its own file. */}
                   <div className="seg2">
                     <button className="on" style={{ cursor: 'default' }}>This clip</button>
                     <button title="Give every clip this same background"
@@ -366,112 +265,6 @@ export default function Inspector({ s }) {
               )}
             </div>
 
-            {/* Face retouch card */}
-            <div className="insp-card">
-              <div className="insp-row-between">
-                <label className="check">
-                  <input type="checkbox" checked={!!rt}
-                         onChange={(e) => edit((c) => { c.rt = e.target.checked ? { ...RT_ON } : null })} />
-                  Face retouch
-                </label>
-                {rt && <span className="rt-reset" title="Reset (all zeroed)"
-                             onClick={() => edit((c) => { c.rt = { ...RT_ZERO, scope: c.rt.scope } })}>↺</span>}
-              </div>
-              {rt && (
-                <>
-                  {!track ? (
-                    <div className="teal-note detecting"><span className="dot" />detecting face…</div>
-                  ) : faceInClip ? (
-                    <div className="teal-note"><span className="dot" />1 face detected · tracked across the clip</div>
-                  ) : (
-                    <div className="warn-note">⚠ <span>No face detected in this clip — retouch won’t apply. Try a clip where the face is visible.</span></div>
-                  )}
-                  <div className="seg2">
-                    <button className={rt.preset === 'natural' ? 'on' : ''}
-                            onClick={() => edit((c) => { c.rt = { ...RT_NATURAL, scope: c.rt.scope } })}>Natural</button>
-                    <button className={rt.preset === 'studio' ? 'on' : ''}
-                            onClick={() => edit((c) => { c.rt = { ...RT_STUDIO, scope: c.rt.scope } })}>Studio</button>
-                    <button className={rt.preset === 'custom' ? 'on' : ''} style={{ cursor: 'default' }}>Custom</button>
-                  </div>
-                  {/* the main control, on its own (REN-192) */}
-                  <label className="slider-label rt-intensity">Smooth skin · {rt.smooth ?? 0}
-                    <input type="range" min="0" max="100" step="1" value={rt.smooth ?? 0}
-                           onPointerDown={beginGesture} onChange={setRt('smooth')} />
-                  </label>
-                  {(rt.smooth ?? 0) === 0 && (
-                    <div className="warn-note">⚠ <span>Smooth skin is at 0, so the skin itself
-                      is untouched. The controls below only change what their name says — a
-                      blemish, a line, a highlight.</span></div>
-                  )}
-                  <label className="slider-label">Overall strength · {rt.intensity ?? 100}
-                    <input type="range" min="0" max="100" step="1" value={rt.intensity ?? 100}
-                           onPointerDown={beginGesture} onChange={setRt('intensity')} />
-                  </label>
-                  <div className="rt-finetune-label">Fine-tune</div>
-                  {/* `?? 0` is not cosmetic: a clip saved before a slider
-                      existed has no key for it, and `value={undefined}` makes
-                      React drop the input to uncontrolled — it then parks at the
-                      middle and READS 50 while the renderer, defaulting the
-                      missing key to 0, applies nothing. That is the "shows 50,
-                      applies 0" the previous attempt at dewrinkle shipped. */}
-                  {RT_SLIDERS.map(([key, label]) => (
-                    <label key={key} className="slider-label">{label} · {rt[key] ?? 0}
-                      <input type="range" min="0" max="100" step="1" value={rt[key] ?? 0}
-                             onPointerDown={beginGesture} onChange={setRt(key)} />
-                    </label>
-                  ))}
-                  {rtStrong && (
-                    <div className="warn-note">⚠ <span>Above ~40 skin starts to look airbrushed. Natural keeps pores and texture.</span></div>
-                  )}
-                  <div className="seg2">
-                    <button className={rt.scope !== 'all' ? 'on' : ''}
-                            onClick={() => edit((c) => { c.rt.scope = 'clip' })}>This clip</button>
-                    <button className={rt.scope === 'all' ? 'on' : ''}
-                            title={pinnedCount
-                              ? `Applies this look to every clip — including ${pinnedCount} set to “This clip”`
-                              : 'Applies this look to every clip'}
-                            onClick={() => {
-                              // pressing the button IS the instruction: it lands
-                              // everywhere. From then on, sliders spare pinned clips.
-                              edit((c, pp) => { c.rt.scope = 'all'; spreadRt(c, pp, true) })
-                              if (pinnedCount) {
-                                s.showToast(`Applied to every clip — ${pinnedCount} had their own retouch (⌘Z undoes it)`)
-                              }
-                            }}>
-                      All clips</button>
-                  </div>
-                  {rt.scope === 'all' && pinnedCount > 0 && (
-                    <div className="foot-note">
-                      {pinnedCount} clip{pinnedCount > 1 ? 's keep' : ' keeps'} its own retouch —
-                      moving a slider here leaves {pinnedCount > 1 ? 'them' : 'it'} alone. Press
-                      “All clips” again to take {pinnedCount > 1 ? 'them' : 'it'} over.
-                    </div>
-                  )}
-                  {rt.scope !== 'all' && (
-                    <div className="foot-note">Only this clip. Changes made with “All clips”
-                      elsewhere will not overwrite it.</div>
-                  )}
-                  {/* The preview is automatic (REN-175). This button used to be
-                      the only way to see the real thing, which is why the whole
-                      feature felt like it needed permission to work; now it only
-                      renders the clip so retouch shows during PLAYBACK too. */}
-                  {rtJob === item.id ? (
-                    <div className="job-progress">
-                      <div className="label">rendering this clip… {rtJobPct}%</div>
-                      <div className="progress-bar"><div style={{ width: `${rtJobPct}%` }} /></div>
-                    </div>
-                  ) : (
-                    <button className="btn-ghost" style={{ height: 30 }} disabled={!faceInClip}
-                            title="Renders the whole clip so the retouch also shows while the video plays. The paused preview is already live."
-                            onClick={() => processRt(item.id)}>
-                      {rtFresh ? '✓ Rendered for playback' : 'Render this clip for playback'}
-                    </button>
-                  )}
-                  <div className="foot-note">The preview updates as you drag — nothing to press.
-                    Hold “compare” on the preview to see the original. Export applies at full resolution.</div>
-                </>
-              )}
-            </div>
           </>
         )}
 

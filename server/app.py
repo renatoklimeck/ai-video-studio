@@ -636,7 +636,7 @@ CUT_WORDS = ("edit", "cut", "take", "corte", "corta", "edite", "edição", "edic
              "escolh", "choose", "pick", "trim", "silêncio", "silencio", "silence")
 TWEAK_WORDS = ("legenda", "caption", "subtitle", "fonte", "font", "cor", "color",
                "tamanho", "size", "posi", "music", "música", "musica", "volume",
-               "zoom", "headline", "título", "titulo", "overlay", "retouch")
+               "zoom", "headline", "título", "titulo", "overlay")
 
 
 def wants_first_cut(message: str) -> bool:
@@ -1908,83 +1908,21 @@ async def segbg(pid: str, request: Request):
     return {"job": jid}
 
 
-@app.post("/api/project/{pid}/retouch")
-async def retouch_preview(pid: str, request: Request):
-    """Accurate face-retouch preview for one clip (proxy-res, real pipeline)."""
-    body = await request.json()
-    jid = run_job([sys.executable, str(RENDER / "retouchpreview.py"), str(pdir(pid)), body["clipId"]])
-    return {"job": jid}
-
-
-# One decoded frame per (source, instant), so moving a slider only pays for the
-# filter chain. Measured on this machine: seek+decode 35 ms, face detection
-# 7.8 ms, the chain itself 132 ms at his own setting and 246 ms with every
-# slider at 100 (REN-161).
-RT_FRAME_CACHE: dict = {}
-RT_FRAME_LOCK = threading.Lock()
-
-
-@app.post("/api/project/{pid}/rt_frame")
-async def rt_frame(pid: str, request: Request):
-    """The CURRENT frame through the REAL retouch pipeline, as a JPEG.
-
-    "Process retouch preview" renders the whole clip, which is why he had to ask
-    for it and then wait. Nothing he is looking at while dragging a slider needs
-    more than the one frame in front of him, and one frame is fast enough to
-    feel live (REN-161)."""
-    body = await request.json()
-    d = pdir(pid)
-    src = project_media(d, body["path"])
-    t = float(body.get("t") or 0)
-    want_w = int(body.get("w") or 0)
-    rt = body.get("rt") or {}
-    sys.path.insert(0, str(RENDER))
-    try:
-        import cv2  # noqa: PLC0415
-        import retouch as RT  # noqa: PLC0415
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(500, f"retouch unavailable: {e}") from e
-
-    # quantise to ~one frame so scrubbing a few ms does not miss the cache
-    key = (str(src), int(src.stat().st_mtime), round(t, 2), want_w)
-    with RT_FRAME_LOCK:
-        hit = RT_FRAME_CACHE.get(key)
-    if hit is None:
-        cap = cv2.VideoCapture(str(src))
-        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t) * 1000)
-        ok, frame = cap.read()
-        cap.release()
-        if not ok or frame is None:
-            raise HTTPException(400, "could not read that frame")
-        if want_w and frame.shape[1] > want_w:
-            sc = want_w / frame.shape[1]
-            frame = cv2.resize(frame, (0, 0), fx=sc, fy=sc, interpolation=cv2.INTER_AREA)
-        # Find the face and the mesh ONCE per instant and keep them with the
-        # frame. Neither depends on a slider, and recomputing the landmarks on
-        # every request cost 275ms-3.3s — the preview stopped feeling live the
-        # moment landmarks went in (REN-176).
-        probe = RT.Retouch({})
-        probe._detect(frame)
-        probe._landmarks(frame)
-        hit = (frame, probe.face, probe.pts)
-        with RT_FRAME_LOCK:
-            if len(RT_FRAME_CACHE) > 24:      # a handful of instants is plenty
-                RT_FRAME_CACHE.clear()
-            RT_FRAME_CACHE[key] = hit
-
-    frame, face, pts = hit
-    out = RT.Retouch(rt).seed(face, pts).apply(frame.copy())
-    ok, buf = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), 86])
-    if not ok:
-        raise HTTPException(500, "encode failed")
-    return Response(content=buf.tobytes(), media_type="image/jpeg",
-                    headers={"Cache-Control": "no-store"})
-
+# Face retouch was REMOVED from the app on 2026-08-04, at Renato's call: four
+# rounds and it still did not look good enough to ship. What went with it:
+# POST /retouch (render one clip through the pipeline) and POST /rt_frame
+# (the live single-frame preview).
+#
+# What deliberately STAYED: every `rt` block in every project.json, and
+# render/retouch.py itself. Nothing he tuned is lost, and bringing the
+# feature back is re-wiring, not rewriting. The face DETECTION below stays
+# too — Auto zoom centres its punch-in on the face and the take splitter
+# reads framing from it.
 
 @app.post("/api/project/{pid}/facedetect")
 async def facedetect(pid: str, request: Request):
     """Face track for a source (YuNet). Returns the cached track when it already
-    exists so the retouch chip/mask are instant on re-activation."""
+    exists. Feeds Auto zoom, which centres its punch-in on the face."""
     body = await request.json()
     d = pdir(pid)
     src = project_media(d, body["path"])

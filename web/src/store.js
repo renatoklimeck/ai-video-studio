@@ -10,10 +10,7 @@ import { timeStore } from './timeStore'
 
 const clone = (o) => structuredClone(o)
 
-// Signature of the retouch slider values — a processed preview is stale when
 // any of these change (mirrors the bg preview's in/out staleness).
-const RT_KEYS = ['v', 'intensity', 'smooth', 'even', 'blem', 'dewrinkle', 'shine', 'plump', 'eyes', 'circles']
-const rtSig = (rt) => RT_KEYS.map((k) => rt?.[k] ?? 0).join(',')
 
 // classify a dropped/pasted file by mime then extension (REN-85)
 const IMG_RE = /\.(png|jpe?g|gif|webp|heic|heif|bmp|avif)$/i
@@ -83,8 +80,6 @@ export function useStudio() {
   const [bgJob, setBgJob] = useState(null)            // clip id being processed
   const [bgJobPct, setBgJobPct] = useState(0)
   const [bgJobAll, setBgJobAll] = useState(null)      // {done,total} while doing every clip
-  const [rtJob, setRtJob] = useState(null)            // clip id: retouch preview
-  const [rtJobPct, setRtJobPct] = useState(0)
   const [faceTracks, setFaceTracks] = useState({})    // srcKey -> track (runtime only)
   const [toast, setToast] = useState(null)            // transient error/info toast
   const [appVersion, setAppVersion] = useState('')    // release name, e.g. 2026.08.04.1
@@ -902,7 +897,7 @@ export function useStudio() {
   }, [flushSave, mutate, showToast])
   const stopBgAll = useCallback(() => { bgAllStop.current = true }, [])
 
-  // ---------- face retouch preview (REN-84) ----------
+  // ---------- face detection (Auto zoom centres its punch-in on it) ----------
   // Face track for a source, generated on demand, kept in runtime state (never
   // saved to project.json — it would bloat every autosave). Powers the honest
   // "face detected" chip and the live face-masked preview mask.
@@ -1014,34 +1009,6 @@ export function useStudio() {
       ? `Zoom on ${applied} take${applied > 1 ? 's' : ''}${skipped ? `, ${skipped} left alone` : ''} — press again to remove`
       : 'Nothing to zoom — the takes are too short, or they already have keyframes')
   }, [mutate, showToast, detectFace])
-
-  // Accurate retouch preview: render this clip through the real pipeline at
-  // proxy res (mirrors processBg). Stores rt._cache + processed/stale on the clip.
-  const processRt = useCallback(async (clipId) => {
-    const pid = pidRef.current
-    await flushSave()
-    const at = projRef.current?.clips.find((x) => x.id === clipId)
-    if (!at?.rt) return
-    const jobIn = at.in, jobOut = at.out, sig = rtSig(at.rt)
-    setRtJob(clipId)
-    setRtJobPct(0)
-    try {
-      const { job } = await api.retouch(pid, clipId)
-      const st = await pollJob(job, (s) => setRtJobPct(Math.round(100 * s.progress / (s.total || 1))))
-      if (st.status === 'done' && st.result && pidRef.current === pid) {
-        mutate((p) => {
-          const c = p.clips.find((x) => x.id === clipId)
-          if (c?.rt) {
-            c.rt.processed = true
-            c.rt._cache = { path: st.result, in: jobIn, out: jobOut, sig }
-            c.rt.stale = c.in !== jobIn || c.out !== jobOut
-          }
-        }, false)
-      }
-    } finally {
-      setRtJob(null)
-    }
-  }, [flushSave, mutate])
 
   // ---------- transcription editing (Descript-style, REN-83) ----------
   // Per-source transcripts live on disk (sources[key].transcript); their content
@@ -1550,7 +1517,7 @@ export function useStudio() {
     fullscreen, setFullscreen, importing, vw, isMobile: vw < 760,
     menuOpen, setMenuOpen, compare, setCompare, inlineEdit, setInlineEdit,
     exp, transc, bgJob, bgJobPct, bgJobAll, processBgAll, stopBgAll,
-    rtJob, rtJobPct, faceTracks, detectFace, processRt,
+    faceTracks, detectFace,
     capApplyAll, setCapApplyAll, spreadCapLook, splitCaption, moveCaption, autoZoom,
     toast, busyMedia, showToast, dropMedia, pasteImage, classifyFile, appVersion,
     leftTab, setLeftTab, transcripts, transcribing, loadTranscripts, transcribeSources,
@@ -1565,7 +1532,7 @@ export function useStudio() {
     openProject, backToProjects, loadLibrary,
     mutate, beginGesture, undo, redo, canUndo, canRedo,
     deleteSel, addCaption, addText, addOverlayFile, addAudioFile, addTakeFile,
-    setAspect, splitClip, processBg, rtSig, toggleTrack, renameTrack,
+    setAspect, splitClip, processBg, toggleTrack, renameTrack,
     startExport, openExport, openTranscribe, startTranscribe, sendChat, restoreSnapshot,
     importNewProject, startEmpty, duplicateProject, removeProject,
   }

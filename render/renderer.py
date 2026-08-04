@@ -1,7 +1,7 @@
 """Export engine: project.json (schema v2) -> final MP4.
 Handles: multi-source timeline cuts, per-clip zoom keyframes, whole-frame fade
 in/out to black, per-clip background removal (rembg) with replacement
-image/color, per-clip face retouch (render/retouch.py), image/video overlays
+image/color, image/video overlays
 (rounded corners, cover crop center/top, reversible image cutout), karaoke +
 static caption groups (timeline time, wrapped like the web preview), headline
 text blocks, and a mixed audio bed (per-clip voice with fades + audio tracks +
@@ -16,7 +16,7 @@ owns its own cv2.VideoCapture handles), and each chunk is encoded on the Apple
 Silicon media engine (h264_videotoolbox) instead of libx264. Segments are
 stitched with the ffmpeg concat demuxer in the same pass that muxes the audio.
 Chunk boundaries never fall inside a clip that carries frame-to-frame state
-(bg removal EMA, face-retouch tracking); when a chunk does start mid-clip the
+(the bg-removal EMA); when a chunk does start mid-clip the
 worker replays the decode exactly like the serial renderer (seek to the clip
 start, then grab forward) so the emitted frames are bit-identical.
 
@@ -42,7 +42,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 from common import (REF_H, caption_bounds, draw_caption, draw_text_block, hex_rgb,
                     item_alpha, load_project, materialize_cap, out_duration,
                     out_to_source, pick_caption_at, clip_out_start, zoom_at)
-from retouch import Retouch
 
 FFMPEG = "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"
 if not Path(FFMPEG).exists():
@@ -302,11 +301,11 @@ def plan_chunks(project, n_frames, fps, n_workers):
     """Contiguous [start, end) frame ranges, one per worker. Cuts land on clip
     boundaries when one is close by (zero decode replay); otherwise they land
     exactly on the balanced position, which is only allowed inside clips with
-    no frame-to-frame state (bg removal EMA / face-retouch tracker)."""
+    no frame-to-frame state (the bg-removal EMA)."""
     if n_workers <= 1 or n_frames < 2 * n_workers:
         return [(0, n_frames)]
     bounds = clip_boundary_frames(project, n_frames, fps)
-    stateful = {i for i, c in enumerate(project["clips"]) if c.get("bg") or c.get("rt")}
+    stateful = {i for i, c in enumerate(project["clips"]) if c.get("bg")}
     step = n_frames / n_workers
     cuts = set()
     for k in range(1, n_workers):
@@ -358,10 +357,12 @@ def render_range(project, pdir, args, W, H, fps, out_dur, n_frames, f0, f1, out_
                 if im is not None:
                     bg_images[p] = cover_box(im, W, H)
 
-    retouchers = {}  # clip id -> Retouch (face tracking is per-clip)
-    for c in project["clips"]:
-        if c.get("rt"):
-            retouchers[c["id"]] = Retouch(c["rt"])
+    # Face retouch was REMOVED from the app (2026-08-04, at Renato's call after
+    # four rounds that never looked good enough). The `rt` block is deliberately
+    # left untouched in every project.json so nothing he set is lost — the
+    # renderer simply does not read it. render/retouch.py is still in the repo;
+    # bringing the feature back means wiring these two lines and the Inspector
+    # card again, not rewriting it.
 
     ov_videos, ov_images = {}, {}
     for o in project.get("overlays", []):
@@ -457,9 +458,6 @@ def render_range(project, pdir, args, W, H, fps, out_dur, n_frames, f0, f1, out_
                 back = np.zeros((H, W, 3), np.uint8)
                 back[:] = hex_rgb(bg.get("color", "#000000"))[::-1]
             frame = (frame.astype(np.float32) * m + back.astype(np.float32) * (1 - m)).astype(np.uint8)
-
-        if clip["id"] in retouchers and not video_hidden:
-            frame = retouchers[clip["id"]].apply(frame)
 
         z = zoom_at(clip, t - clip_starts[ci])
         if z and abs(z[0] - 1.0) > 1e-3 and not video_hidden:
@@ -628,7 +626,7 @@ def run_workers(chunks, args, tmpdir, enc_kind, n_frames):
     for k, (a, b) in enumerate(chunks):
         # OpenCV threads in proportion to the chunk's share of the timeline: with
         # even chunks that is 1 each (N processes already fill the machine), but a
-        # clip that cannot be split (retouch / bg removal) gets a fat chunk AND
+        # clip that cannot be split (bg removal) gets a fat chunk AND
         # the threads to chew through it. Capped at the performance-core count —
         # spreading one parallel_for over the E cores makes these filters slower,
         # because every barrier waits on the slowest core.
@@ -706,7 +704,7 @@ def main():
     if args.worker:
         # split OpenCV's thread pool across the sibling workers. With many
         # chunks that is 1 thread each (they already fill the machine); with a
-        # few fat chunks (a long face-retouch clip cannot be split) each worker
+        # few fat chunks (a long bg-removal clip cannot be split) each worker
         # keeps enough threads to run the filters as fast as the old renderer.
         cv2.setNumThreads(int(os.environ.get("VSTUDIO_CV_THREADS") or 1))
         f0, f1 = (int(v) for v in args.frames.split(":"))

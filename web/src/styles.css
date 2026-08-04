@@ -399,11 +399,6 @@ input[type="range"] { accent-color: var(--accent); width: 100%; margin: 0; }
   color: var(--accent-ai); background: rgba(95,217,201,0.12); border: 1px solid rgba(95,217,201,0.3);
   padding: 3px 8px; border-radius: 6px; pointer-events: none; z-index: 3;
 }
-.rt-chip {
-  position: absolute; bottom: 12px; left: 12px; font-size: 9px; font-family: var(--font-mono);
-  color: var(--accent-ai); background: rgba(95,217,201,0.12); border: 1px solid rgba(95,217,201,0.3);
-  padding: 3px 8px; border-radius: 6px; pointer-events: none; z-index: 3;
-}
 .teal-note.detecting { opacity: .75; }
 .compare-pill {
   position: absolute; bottom: 12px; right: 12px; font-size: 10px; font-family: var(--font-mono);
@@ -676,10 +671,6 @@ input[type="range"] { accent-color: var(--accent); width: 100%; margin: 0; }
   padding: 8px 10px; background: rgba(255,255,255,0.03);
   border: 1px solid rgba(255,255,255,0.08); border-radius: 8px;
 }
-.rt-reset { cursor: pointer; color: var(--text-faint); font-size: 13px; }
-.rt-reset:hover { color: var(--text-primary); }
-.rt-intensity { color: var(--text-primary); font-weight: 600; }
-.rt-finetune-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-faint); font-weight: 600; margin-top: 2px; }
 
 /* ══════════ timeline ══════════ */
 
@@ -789,10 +780,6 @@ input[type="range"] { accent-color: var(--accent); width: 100%; margin: 0; }
 .chip-bg {
   font-size: 8.5px; color: var(--accent-ai); background: rgba(95,217,201,0.15);
   border: 1px solid rgba(95,217,201,0.35); padding: 1px 5px; border-radius: 4px;
-}
-.chip-rt {
-  font-size: 8.5px; color: var(--accent-light); background: rgba(138,147,255,0.15);
-  border: 1px solid rgba(138,147,255,0.35); padding: 1px 5px; border-radius: 4px;
 }
 /* CapCut trim handle (REN-124): quiet until the pointer is near the edge, then
    a white rounded bracket hugging it. Faint by default so a 40-clip timeline

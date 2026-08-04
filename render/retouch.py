@@ -1,3 +1,15 @@
+# PARKED — not wired into the app.
+#
+# Face retouch was removed from AI Video Studio on 2026-08-04: four rounds of
+# tuning and the result still was not good enough to ship. This file is kept
+# intact so bringing the feature back is re-wiring, not rewriting. The `rt`
+# blocks in every project.json were kept too, so nothing anyone tuned is lost.
+#
+# To revive: re-add `mediapipe>=1.0` to pyproject.toml (imported lazily below,
+# so this module still imports without it), re-add the retouch call in
+# render/renderer.py, the /retouch + /rt_frame routes in server/app.py, and the
+# Face retouch card in web/src/Inspector.jsx. See git history around this date.
+
 """Face retouch export pipeline — skin-only, texture-preserving, no whitening.
 
 Design contract (design/README.md §Face Retouch): face-detection based,

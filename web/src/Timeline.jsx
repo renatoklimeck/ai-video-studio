@@ -274,7 +274,6 @@ export default function Timeline({ s }) {
         if (side === 'l') c.in = Math.max(0, Math.min(oout - MIN_CLIP, +(oin + dt).toFixed(2)))
         else c.out = Math.max(oin + MIN_CLIP, Math.min(srcDur, +(oout + dt).toFixed(2)))
         if (c.bg?.processed) c.bg.stale = true
-        if (c.rt?.processed) c.rt.stale = true
         removed = side === 'l' ? c.in - oin : oout - c.out
         len = c.out - c.in
       }, false)
@@ -577,11 +576,10 @@ export default function Timeline({ s }) {
                       {!locked && fadeDots('clip', c, w)}
                     </div>
                     {rails[i] && <div className={`grp ${rails[i]}`} />}
-                    {(label != null || c.bg || c.rt) && (
+                    {(label != null || c.bg) && (
                       <div className={`lab ${hasStrip ? 'pill' : ''} ${note ? 'noted' : ''}`}>
                         {label != null && <span className="lab-txt">{label}</span>}
                         {c.bg && <span className="chip-bg">BG</span>}
-                        {c.rt && <span className="chip-rt">RT</span>}
                       </div>
                     )}
                     {busyMedia.includes(c.id) && <div className="tl-uploading">processing…</div>}
