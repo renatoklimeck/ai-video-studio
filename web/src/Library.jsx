@@ -31,7 +31,10 @@ export default function Library({ s }) {
           <div className="logo-tile lg"><div className="tri" /></div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
             <div className="brand-title">AI Video Studio</div>
-            <div className="brand-sub">fine-tuning console · Claude ⇄ you</div>
+            <div className="brand-sub">
+              fine-tuning console · Claude ⇄ you
+              {s.appVersion && <> · <span className="app-version inline">{s.appVersion}</span></>}
+            </div>
           </div>
           {/* also here, not just in the editor: this is the screen you land on */}
           <div style={{ marginLeft: 'auto' }}><UpdateButton /></div>

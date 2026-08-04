@@ -123,6 +123,9 @@ export default function Editor({ s }) {
             <button className="btn-icon" title="Redo (⇧⌘Z)" disabled={!s.canRedo} onClick={s.redo}>↪</button>
             <button className="btn-ghost" title="Version history" onClick={() => s.setModal('history')}>History</button>
             <AudioOut s={s} />
+            {/* which release this is (REN-168) — a student reporting a bug can
+                read it off the header instead of digging in the terminal */}
+            {s.appVersion && <span className="app-version" title="Version of AI Video Studio">{s.appVersion}</span>}
             <UpdateButton />
           </>
         )}

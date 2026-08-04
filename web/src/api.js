@@ -98,7 +98,19 @@ export const api = {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ key, path, lang }),
   }).then(j),
-  transcript: (pid, path) => fetch(`/api/project/${pid}/transcript?path=${encodeURIComponent(path)}`).then(j),
+  // clean=1 → the same words the renderer uses (REN-165); raw whisper output
+  // lists words nobody said
+  transcript: (pid, path, clean = true) =>
+    fetch(`/api/project/${pid}/transcript?path=${encodeURIComponent(path)}${clean ? '&clean=1' : ''}`).then(j),
+  // cut boundaries measured on the audio, not on whisper's stamps (REN-164)
+  cutPoints: (pid, src, gaps) => fetch(`/api/project/${pid}/cut_points`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ src, gaps }),
+  }).then(j),
+  cutWarm: (pid, src) => fetch(`/api/project/${pid}/cut_warm`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ src }),
+  }).then(j),
   chat: (pid) => fetch(`/api/project/${pid}/chat`).then(j),
   chatSend: (pid, message, model, effort, preset) => fetch(`/api/project/${pid}/chat`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },

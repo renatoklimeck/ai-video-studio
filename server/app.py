@@ -1628,6 +1628,7 @@ async def transcribe_source(pid: str, request: Request):
 
 PREWARM = {}                 # pid -> job id, so the UI can show it running
 PREWARM_LOCK = threading.Lock()
+CUT_WARM = set()             # "pid:src" being decoded for cut boundaries (REN-164)
 
 
 def prewarm_transcript(d: Path, key="main"):
@@ -1667,10 +1668,83 @@ def prewarm_status(pid: str):
 
 
 @app.get("/api/project/{pid}/transcript")
-def get_transcript(pid: str, path: str):
+def get_transcript(pid: str, path: str, clean: int = 0):
+    """`clean=1` returns the words the RENDERER works from (REN-165).
+
+    Whisper's raw output carries loops and collapsed-clock bursts, and every
+    consumer that decides what ends up on screen — the take splitter, the
+    caption generator — runs `sanitize()` over it first. The Cut tab did not,
+    so it listed words nobody said: 228 of 751 on `as-4-engrenagens`, 34 of 917
+    on `img-7580-4`. Reading them from here rather than porting the sanitiser
+    to JS keeps one implementation, so the two can never drift apart again.
+
+    Called WITHOUT audio runs, exactly like captions_from_transcript.py, so the
+    panel's word list matches the captions' word list character for character.
+    """
     d = pdir(pid)
     f = project_media(d, path)
-    return json.loads(f.read_text())
+    data = json.loads(f.read_text())
+    if not clean:
+        return data
+    sys.path.insert(0, str(RENDER))
+    try:
+        from takes import sanitize  # noqa: PLC0415
+        kept, dropped = sanitize(data.get("words") or [])
+        return {**data, "words": kept, "dropped": len(dropped)}
+    except Exception:  # noqa: BLE001 — a panel with raw words beats no panel
+        return data
+
+
+@app.post("/api/project/{pid}/cut_points")
+async def cut_points(pid: str, request: Request):
+    """Where to cut between two words, measured on the audio (REN-164).
+
+    The Cut tab cannot answer this from whisper's stamps: 685 of this project's
+    916 consecutive word pairs have a gap of exactly zero and 159 overlap, so
+    the midpoint of two stamps is either the previous word's own end or a point
+    inside it. Each returned point says whether a real pause was found; when it
+    was not, the caller warns instead of quietly cutting through speech.
+    """
+    body = await request.json()
+    d = pdir(pid)
+    gaps = body.get("gaps") or []
+    if not gaps:
+        return {"points": []}
+    sys.path.insert(0, str(RENDER))
+    try:
+        import cutpoints  # noqa: PLC0415
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"cut point engine unavailable: {e}") from e
+    return {"points": cutpoints.resolve(d, body.get("src") or "main", gaps)}
+
+
+@app.post("/api/project/{pid}/cut_warm")
+async def cut_warm(pid: str, request: Request):
+    """Decode and cache a source's audio envelope ahead of the first cut, so the
+    first delete is not the one that waits for ffmpeg. Fire-and-forget."""
+    body = await request.json()
+    d = pdir(pid)
+    src_key = body.get("src") or "main"
+    sys.path.insert(0, str(RENDER))
+    try:
+        import cutpoints  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 — warming never breaks the panel
+        return {"warm": False}
+    key = f"{pid}:{src_key}"
+    with PREWARM_LOCK:
+        if key in CUT_WARM:
+            return {"warm": "running"}
+        CUT_WARM.add(key)
+
+    def run():
+        try:
+            cutpoints.warm(d, src_key)
+        finally:
+            with PREWARM_LOCK:
+                CUT_WARM.discard(key)
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"warm": "started"}
 
 
 @app.post("/api/project/{pid}/strip")
@@ -2040,9 +2114,15 @@ def update_check():
         cnt = git("rev-list", "--count", f"HEAD..origin/{branch}").stdout.strip()
         behind = int(cnt) if cnt.isdigit() else 0
         subject = ""
+        latest_version = ""
         if behind:
             subject = (git("log", "-1", "--format=%s", f"origin/{branch}").stdout or "").strip()
+            # the release NAME of what is being offered, not just the commit
+            # subject (REN-168). Missing on checkouts older than the VERSION
+            # file, so the popup falls back to the subject.
+            latest_version = (git("show", f"origin/{branch}:VERSION").stdout or "").strip()
         return {"supported": True, "behind": behind, "latest": subject,
+                "latestVersion": latest_version, "version": read_version(),
                 "current": (git("log", "-1", "--format=%s").stdout or "").strip()}
     except Exception as e:  # noqa: BLE001 — never let this break the header
         return {"supported": False, "reason": str(e)[:120]}
@@ -2082,15 +2162,27 @@ def update_log():
     return {"lines": lines[-12:], "done": done}
 
 
+def read_version() -> str:
+    """The release this checkout is (REN-168). CalVer `YYYY.MM.DD.n` — sorts
+    right everywhere and cannot be read as a different date in another country,
+    which `08_06_26` can. Empty string when the file is missing so the header
+    just shows nothing instead of a scary placeholder."""
+    try:
+        return (ROOT / "VERSION").read_text().strip()
+    except OSError:
+        return ""
+
+
 @app.get("/api/version")
 def get_version():
     """Build id of the served UI (dist mtime). The client polls this and
     auto-reloads when it changes — a stale cached UI hid the approve button
-    for days (REN-131)."""
+    for days (REN-131). `version` is the release name for the header."""
     try:
-        return {"build": int((ROOT / "web" / "dist" / "index.html").stat().st_mtime)}
+        build = int((ROOT / "web" / "dist" / "index.html").stat().st_mtime)
     except OSError:
-        return {"build": 0}
+        build = 0
+    return {"build": build, "version": read_version()}
 
 
 @app.get("/api/engines")

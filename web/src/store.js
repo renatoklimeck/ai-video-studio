@@ -85,6 +85,7 @@ export function useStudio() {
   const [rtJobPct, setRtJobPct] = useState(0)
   const [faceTracks, setFaceTracks] = useState({})    // srcKey -> track (runtime only)
   const [toast, setToast] = useState(null)            // transient error/info toast
+  const [appVersion, setAppVersion] = useState('')    // release name, e.g. 2026.08.04.1
   const [busyMedia, setBusyMedia] = useState([])      // ids uploading/processing (chips)
   const [leftTab, setLeftTab] = useState('claude')    // 'claude' | 'transcript'
   const [transcripts, setTranscripts] = useState({})  // srcKey -> {words, lang} (runtime)
@@ -240,8 +241,11 @@ export function useStudio() {
     let base = null, dead = false
     const check = async () => {
       try {
-        const { build } = await api.version()
-        if (dead || !build) return
+        const { build, version } = await api.version()
+        if (dead) return
+        // the release name for the header (REN-168) — same request, no extra poll
+        if (version) setAppVersion(version)
+        if (!build) return
         if (base == null) { base = build; return }
         if (build !== base) { await flushSave(); window.location.reload() }
       } catch { /* server briefly down — next tick retries */ }
@@ -1286,7 +1290,7 @@ export function useStudio() {
     fullscreen, setFullscreen, importing, vw, isMobile: vw < 760,
     menuOpen, setMenuOpen, compare, setCompare, inlineEdit, setInlineEdit,
     exp, transc, bgJob, bgJobPct, rtJob, rtJobPct, faceTracks, detectFace, processRt,
-    toast, busyMedia, showToast, dropMedia, pasteImage, classifyFile,
+    toast, busyMedia, showToast, dropMedia, pasteImage, classifyFile, appVersion,
     leftTab, setLeftTab, transcripts, transcribing, loadTranscripts, transcribeSources,
     transcriptDelete, transcriptRestore, transcriptSplitSource,
     chatOpen, setChatOpen, chatMsgs, chatInput, setChatInput, claudeTyping,

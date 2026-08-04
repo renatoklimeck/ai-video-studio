@@ -25,8 +25,12 @@ export default function UpdateButton() {
           // and someone who never updates is running the bugs we already fixed;
           // asking every launch would be nagging, so the answer is remembered
           // against the version it was given for.
+          // keyed on the version name when there is one (REN-168): the commit
+          // subject can repeat between releases, and then "Not now" would
+          // silence a genuinely new version.
           const key = 'vs-update-asked'
-          if (localStorage.getItem(key) !== r.latest) setAsk({ ...r, key })
+          const seen = r.latestVersion || r.latest
+          if (localStorage.getItem(key) !== seen) setAsk({ ...r, key, seen })
         }
       } catch { /* offline — the app works fine without this */ }
     }
@@ -68,14 +72,24 @@ export default function UpdateButton() {
         <div className="update-ask-back" onClick={() => setAsk(null)}>
           <div className="update-ask" onClick={(e) => e.stopPropagation()}>
             <h3>A new version is available</h3>
-            <p className="update-ask-what">{ask.latest}</p>
+            {/* the version NAME first (REN-168) — "2026.08.04.2" is what the
+                header will show afterwards, so it is what to compare against.
+                Checkouts older than the VERSION file have none: fall back to
+                the commit subject rather than showing an empty box. */}
+            {ask.latestVersion
+              ? <p className="update-ask-what">
+                  <span className="update-ask-ver">{ask.latestVersion}</span>
+                  {ask.version ? <span className="update-ask-from"> — you have {ask.version}</span> : null}
+                </p>
+              : <p className="update-ask-what">{ask.latest}</p>}
+            {ask.latestVersion && ask.latest && <p className="update-ask-sub">{ask.latest}</p>}
             <p className="update-ask-note">
               It takes about a minute. Your projects are not touched, and if
               anything fails it puts the working version back.
             </p>
             <div className="update-ask-actions">
               <button className="btn-modal" onClick={() => {
-                localStorage.setItem(ask.key, ask.latest || '')
+                localStorage.setItem(ask.key, ask.seen || '')
                 setAsk(null)
               }}>Not now</button>
               <button className="btn-modal primary" onClick={run}>Update now</button>
@@ -85,7 +99,8 @@ export default function UpdateButton() {
       )}
       {phase === 'idle' && (
         <button className="btn-update" onClick={run}
-                title={state.latest ? `Latest: ${state.latest}` : 'Install the new version'}>
+                title={state.latestVersion ? `Update to ${state.latestVersion}`
+                     : state.latest ? `Latest: ${state.latest}` : 'Install the new version'}>
           ↑ Update{state.behind > 1 ? ` (${state.behind})` : ''}
         </button>
       )}

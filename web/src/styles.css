@@ -1196,6 +1196,14 @@ input[type="range"] { accent-color: var(--accent); width: 100%; margin: 0; }
 .audioout-row.sel { background: var(--bg-hover); color: var(--accent, #a78bfa); }
 .audioout-note { font-size: 11px; color: var(--text-muted); padding: 6px 8px; line-height: 1.4; }
 
+/* release name in the header (REN-168). Deliberately quiet: it is there to be
+   read when something goes wrong, not to compete with the controls. */
+.app-version {
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-muted);
+  opacity: .65; letter-spacing: .2px; user-select: text; white-space: nowrap;
+}
+.app-version.inline { opacity: .8; }
+
 /* in-app updater (header) */
 .updater { position: relative; }
 .btn-update {
@@ -1228,5 +1236,10 @@ input[type="range"] { accent-color: var(--accent); width: 100%; margin: 0; }
 .update-ask-what { margin: 0 0 10px; font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px;
   color: var(--text-primary); background: var(--bg-panel-2); border: 1px solid var(--border-default);
   border-radius: 8px; padding: 8px 10px; word-break: break-word; }
+.update-ask-ver { font-size: 14px; font-weight: 650; color: var(--text-primary); }
+.update-ask-from { color: var(--text-muted); }
+/* the commit subject, demoted below the version name (REN-168) */
+.update-ask-sub { margin: -4px 0 10px; padding: 0 2px; font-size: 12px; line-height: 1.45;
+  color: var(--text-muted); word-break: break-word; }
 .update-ask-note { margin: 0 0 16px; font-size: 12px; line-height: 1.5; color: var(--text-muted); }
 .update-ask-actions { display: flex; gap: 8px; justify-content: flex-end; }
