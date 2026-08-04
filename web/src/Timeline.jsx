@@ -274,6 +274,49 @@ export default function Timeline({ s }) {
     setSel({ type, id })
   }
 
+  // Move a caption, or stretch one of its edges (REN-157).
+  //
+  // `edge` null = drag the whole group, 'l'/'r' = one edge. The store converts
+  // the timeline position back to source seconds and stops at the neighbours
+  // rather than pushing them — nothing may ever overlap (REN-156). A magnet
+  // pulls to nearby caption edges and clip cuts; alt suspends it.
+  function capDrag(e, it, edge = null) {
+    if (typeLocked(p, 'cap')) return
+    e.stopPropagation(); e.preventDefault()
+    setSel({ type: 'cap', id: it.id })
+    beginGesture()
+    try { e.currentTarget.setPointerCapture(e.pointerId) } catch { /* synthetic */ }
+    const sx = e.clientX
+    const t0 = it.t0, t1 = it.t1
+    // magnets: every other caption edge, every cut, and the playhead
+    const snaps = []
+    for (const o of elementLanes[0].items) {
+      if (o.id === it.id) continue
+      snaps.push(o.t0, o.t1)
+    }
+    let acc = 0
+    for (const c of p.clips || []) { snaps.push(acc); acc += c.out - c.in }
+    snaps.push(acc)
+    const SNAP_PX = 7
+    const move = (ev) => {
+      let t = (edge === 'r' ? t1 : t0) + (ev.clientX - sx) / pps
+      if (!ev.altKey) {
+        let best = null, bd = SNAP_PX / pps
+        for (const sp of snaps) { const d = Math.abs(sp - t); if (d < bd) { bd = d; best = sp } }
+        if (best != null) t = best
+      }
+      s.moveCaption(it.id, +t.toFixed(3), edge)
+    }
+    const up = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up)
+  }
+
   // drag the volume line over a clip's waveform (CapCut-style) — vol 0–2, one undo
   function volDrag(e, clip) {
     if (trackFlag(p, 'video', 'locked')) return
@@ -452,10 +495,24 @@ export default function Timeline({ s }) {
                       <div key={it.id}
                            className={`tl-block ${lane.key} ${sel?.type === lane.key && sel.id === it.id ? 'sel' : ''}`}
                            style={{ left: Math.round(it.t0 * pps), height: Math.max(18, h - 4), width: Math.max(20, Math.round((it.t1 - it.t0) * pps)) }}
-                           title={it.label}
-                           onPointerDown={(e) => { e.stopPropagation(); selectItem(lane.key, it.id) }}>
+                           title={lane.key === 'cap'
+                             ? `${it.label}\ndrag to move · edges to stretch · alt disables the magnet`
+                             : it.label}
+                           onPointerDown={(e) => {
+                             e.stopPropagation()
+                             selectItem(lane.key, it.id)
+                             // captions move on the timeline (REN-157); the other
+                             // lanes keep their inspector-only behaviour
+                             if (lane.key === 'cap' && !locked) capDrag(e, it, null)
+                           }}>
                         {media && <div className="bgimg" style={media} />}
                         <span className={media ? 'pill' : ''}>{it.label}</span>
+                        {lane.key === 'cap' && !locked && (
+                          <>
+                            <div className="trim-handle l" onPointerDown={(e) => capDrag(e, it, 'l')} />
+                            <div className="trim-handle r" onPointerDown={(e) => capDrag(e, it, 'r')} />
+                          </>
+                        )}
                         {busyMedia.includes(it.id) && <div className="tl-uploading">processing…</div>}
                       </div>
                     )

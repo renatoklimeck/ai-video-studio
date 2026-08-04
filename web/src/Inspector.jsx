@@ -91,7 +91,7 @@ const RT_SLIDERS = [
 
 export default function Inspector({ s }) {
   const { project: p, sel, setSel, mutate, beginGesture, deleteSel, isMobile,
-          bgJob, bgJobPct, processBg, currentId,
+          bgJob, bgJobPct, bgJobAll, processBg, currentId,
           rtJob, rtJobPct, processRt, faceTracks, detectFace } = s
   const bgImgRef = useRef(null)
   const capSpanRef = useRef(null)
@@ -107,7 +107,13 @@ export default function Inspector({ s }) {
     if (typeLocked(p, sel.type)) return // locked track: read-only in the inspector
     mutate((pp) => {
       const it = (pp[listMap[sel.type]] || []).find((x) => x.id === sel.id)
-      if (it) fn(it, pp)
+      if (!it) return
+      fn(it, pp)
+      // Every caption control goes through here, so "apply to all captions"
+      // (REN-155) belongs here rather than repeated on each field — a control
+      // added later is covered automatically. Only the LOOK travels; the words
+      // and their times are what each caption is.
+      if (sel.type === 'cap' && s.capApplyAll) s.spreadCapLook(pp, it)
     }, undoable)
   }
   // continuous controls (sliders, number spinners, textareas, color pickers)
@@ -160,6 +166,7 @@ export default function Inspector({ s }) {
   // how many OTHER clips are pinned to their own retouch — so the rule is
   // visible instead of silent (REN-162)
   const pinnedCount = (p.clips || []).filter((o) => o.id !== item?.id && rtPinned(o)).length
+  const bgClipCount = (p.clips || []).filter((o) => o.bg).length   // REN-163
   // real face detection for the honest chip + live mask (runtime only)
   const rtSrc = rt ? (item.src || 'main') : null
   useEffect(() => {
@@ -245,7 +252,7 @@ export default function Inspector({ s }) {
                            ? { color: '#0E3B34', feather: 4, image: null, processed: false, stale: false }
                            : null
                        })} />
-                Remove background on this clip
+                Remove background
               </label>
               {item.bg && (
                 <>
@@ -265,15 +272,51 @@ export default function Inspector({ s }) {
                     <div className="insp-hint" style={{ cursor: 'pointer' }}
                          onClick={() => editClipStale((c) => { c.bg.image = null })}>✕ remove background image</div>
                   )}
-                  {bgJob === item.id ? (
+                  {/* apply this background to every clip, like face retouch
+                      (REN-163). Copies the LOOK only — each clip renders its
+                      own preview file. */}
+                  <div className="seg2">
+                    <button className="on" style={{ cursor: 'default' }}>This clip</button>
+                    <button title="Give every clip this same background"
+                            onClick={() => {
+                              edit((c, pp) => {
+                                // the LOOK only — each clip renders its own
+                                // preview file, so carrying _cache across would
+                                // point them all at one clip's video
+                                const { _cache, processed, stale, ...look } = c.bg
+                                for (const o of pp.clips) {
+                                  if (o.id === c.id) continue
+                                  o.bg = { ...structuredClone(look), processed: false, stale: false }
+                                }
+                              })
+                              s.showToast('Background turned on for every clip — “Process all clips” renders them')
+                            }}>All clips</button>
+                  </div>
+                  {bgJobAll ? (
+                    <div className="job-progress">
+                      <div className="label">
+                        background · clip {bgJobAll.done + 1} of {bgJobAll.total} · {bgJobPct}%
+                      </div>
+                      <div className="progress-bar"><div style={{ width: `${bgJobPct}%` }} /></div>
+                      <button className="btn-ghost" style={{ height: 28, marginTop: 6 }}
+                              onClick={s.stopBgAll}>Stop</button>
+                    </div>
+                  ) : bgJob === item.id ? (
                     <div className="job-progress">
                       <div className="label">processing background… {bgJobPct}%</div>
                       <div className="progress-bar"><div style={{ width: `${bgJobPct}%` }} /></div>
                     </div>
                   ) : (
-                    <button className="btn-violet" style={{ height: 32 }} onClick={() => processBg(item.id)}>
-                      {item.bg.processed ? 'Re-process background preview' : 'Process background preview'}
-                    </button>
+                    <>
+                      <button className="btn-violet" style={{ height: 32 }} onClick={() => processBg(item.id)}>
+                        {item.bg.processed ? 'Re-process background preview' : 'Process background preview'}
+                      </button>
+                      {bgClipCount > 1 && (
+                        <button className="btn-ghost" style={{ height: 30 }} onClick={s.processBgAll}>
+                          Process all {bgClipCount} clips
+                        </button>
+                      )}
+                    </>
                   )}
                   {item.bg.stale && (
                     <div className="warn-note">⚠ <span>Clip changed after processing — re-process to refresh the preview.</span></div>
@@ -405,12 +448,36 @@ export default function Inspector({ s }) {
                             // mark hand-edited so Retranscribe won't overwrite it
                             editLive((c) => { c.words = capSrc ? mkWordsSrcCovered(p, c.src || 'main', txt, t0, t1) : mkWords(txt, t0, t1); c.edited = true })
                           }}
+                          onKeyDown={(e) => {
+                            // Enter splits the caption at the cursor (REN-158)
+                            if (e.key !== 'Enter' || e.shiftKey) return
+                            e.preventDefault()
+                            const txt = e.target.value
+                            const before = txt.slice(0, e.target.selectionStart)
+                            const k = before.split(/\s+/).filter(Boolean).length
+                            setCapDraft(null)
+                            s.splitCaption(item.id, k)
+                          }}
                           onBlur={() => setCapDraft(null)} />
               </label>
               <div className="teal-note"><span className="dot" />
                 {item.words.length} words · re-synced to audio {fmtTime(capT0)}–{fmtTime(capT1)}
               </div>
+              <div className="insp-hint">⏎ at the cursor splits this caption in two</div>
             </div>
+
+            {/* REN-155 — captions are a style, not one decision per group. ON by
+                default and remembered, so it never has to be re-armed. */}
+            <label className="check cap-all">
+              <input type="checkbox" checked={s.capApplyAll}
+                     onChange={(e) => s.setCapApplyAll(e.target.checked)} />
+              Apply to all captions
+              <span className="insp-hint" style={{ marginLeft: 6 }}>
+                {s.capApplyAll
+                  ? `position, font, colour, size, karaoke… go to all ${(p.captions || []).length}`
+                  : 'changes affect only this one'}
+              </span>
+            </label>
             <div className="grid2">
               <label className="field span2">Font
                 <select value={item.font} onChange={(e) => edit((c) => { c.font = e.target.value })}>

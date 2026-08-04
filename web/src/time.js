@@ -134,6 +134,76 @@ export function capSpan(cap) {
   return [ws[0].t, ws[ws.length - 1].t + ws[ws.length - 1].d + 0.15]
 }
 
+// ── captions never overlap (REN-156) ────────────────────────────────────────
+//
+// Two captions on screen at once is never something he asked for — it is always
+// the result of a mutation that did not look at its neighbours (a manual add on
+// top of an existing one, a drag, a stretch, a split). The rule lives here, in
+// TIMELINE seconds, because that is where "at the same time" means anything:
+// the words are stored in SOURCE seconds and two groups of different sources
+// can hold the same source instant without ever being visible together.
+
+/** [start, end] of a caption on the timeline, or null when it is fully cut. */
+export function capTimelineSpan(project, cap) {
+  const m = materializeCap(project, cap)
+  return m ? capSpan(m) : null
+}
+
+/** Every caption's VISIBLE timeline span, sorted, optionally excluding one id.
+ *
+ * The tail is clipped at the next group's start, exactly as the preview and
+ * render/common.py:caption_bounds do. Without that clip the raw spans of
+ * ordinary back-to-back karaoke groups all "overlap" by the 0.15s tail — 38 of
+ * 52 groups on his own project — and an overlap rule built on them would fire
+ * on data that draws perfectly. */
+export function capSpans(project, exceptId = null) {
+  const raw = (project.captions || [])
+    .filter((c) => c.id !== exceptId)
+    .map((c) => { const sp = capTimelineSpan(project, c); return sp && { id: c.id, a: sp[0], b: sp[1] } })
+    .filter(Boolean)
+    .sort((x, y) => x.a - y.a)
+  for (let i = 0; i < raw.length - 1; i++) raw[i].b = Math.min(raw[i].b, raw[i + 1].a)
+  return raw
+}
+
+/** The room around `t` that no other caption is using: [from, to], or null. */
+export function freeSlotAt(project, t, exceptId = null, want = 0.8) {
+  const spans = capSpans(project, exceptId)
+  const end = outDuration(project)
+  let from = Math.max(0, Math.min(t, end))
+  for (const s of spans) {
+    if (s.b <= from + 1e-3) continue          // entirely before us
+    if (s.a > from + 1e-3) {                  // a gap starts here
+      const to = Math.min(s.a, end)
+      if (to - from >= want) return [from, to]
+    }
+    from = Math.max(from, s.b)                // inside/before it — move past
+  }
+  return end - from >= want ? [from, end] : null
+}
+
+/** The room a caption may move or stretch into.
+ *
+ * Bounded by where the NEIGHBOURS BEGIN AND END, not by where they currently
+ * stop drawing. Because every tail is clipped at the next start, a caption
+ * pushed into its neighbour's time does not overlap it — the neighbour simply
+ * ends earlier, which is what "the new one takes that space" looks like. Using
+ * the drawn edges as the limit instead left zero room on a fully captioned
+ * video (karaoke groups are back to back), so dragging did nothing at all.
+ *
+ * The margin is what stops him squeezing a neighbour off the screen entirely. */
+export const CAP_MIN = 0.25
+
+export function capLimits(project, capId, at) {
+  const spans = capSpans(project, capId)
+  let lo = 0, hi = outDuration(project)
+  for (const s of spans) {
+    if (s.a <= at) lo = Math.max(lo, s.a + CAP_MIN)     // keep the one before visible
+    else { hi = Math.min(hi, s.b - CAP_MIN); break }    // and the one after
+  }
+  return [Math.max(0, lo), Math.max(lo + CAP_MIN, hi)]
+}
+
 // Caption re-sync: split text on whitespace, distribute evenly over [t0, t1]
 export function mkWords(text, t0, t1) {
   const parts = text.split(/\s+/).filter(Boolean)

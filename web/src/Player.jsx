@@ -631,8 +631,22 @@ export default function Player({ s, onImportVideo }) {
     if (e.key === 'Escape') { e.preventDefault(); e.target.blur(); commitEdit() }
     if (e.key === 'Enter') {
       e.preventDefault()
-      if (type === 'cap') { e.target.blur(); commitEdit() } // captions have no manual breaks
-      else document.execCommand('insertText', false, '\n')
+      if (type === 'cap') {
+        // Enter SPLITS at the cursor (REN-158) — the two halves keep the word
+        // times they already had, so neither drifts off the audio.
+        const sel2 = window.getSelection()
+        let k = 0
+        if (sel2 && sel2.rangeCount && editElRef.current) {
+          const r = sel2.getRangeAt(0).cloneRange()
+          r.selectNodeContents(editElRef.current)
+          r.setEnd(sel2.getRangeAt(0).endContainer, sel2.getRangeAt(0).endOffset)
+          k = r.toString().split(/\s+/).filter(Boolean).length
+        }
+        const capId = item.id
+        e.target.blur()
+        commitEdit()
+        s.splitCaption(capId, k)
+      } else document.execCommand('insertText', false, '\n')
     }
   }
 

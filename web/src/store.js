@@ -4,7 +4,8 @@
 // compare · export · bgJob · chat · snapshots
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, pollJob } from './api'
-import { mkWordsSrcCovered, outDuration, outToSource, typeLocked, uid } from './time'
+import { CAP_MIN, capLimits, capSpans, capTimelineSpan, freeSlotAt, mkWordsSrcCovered, outDuration, outToSource,
+         sourceToTimeline, typeLocked, uid } from './time'
 import { timeStore } from './timeStore'
 
 const clone = (o) => structuredClone(o)
@@ -81,6 +82,7 @@ export function useStudio() {
   const [transc, setTransc] = useState({ phase: 'choose', pct: 0, added: null, log: [] })
   const [bgJob, setBgJob] = useState(null)            // clip id being processed
   const [bgJobPct, setBgJobPct] = useState(0)
+  const [bgJobAll, setBgJobAll] = useState(null)      // {done,total} while doing every clip
   const [rtJob, setRtJob] = useState(null)            // clip id: retouch preview
   const [rtJobPct, setRtJobPct] = useState(0)
   const [faceTracks, setFaceTracks] = useState({})    // srcKey -> track (runtime only)
@@ -506,19 +508,140 @@ export function useStudio() {
 
   // ---------- add elements (created at the playhead, auto-selected) ----------
   const addCaption = useCallback(() => {
-    const t = +timeStore.get().toFixed(2)
+    const proj = projRef.current
+    if (!proj) return
     const id = uid('g')
-    // anchor the new caption to the source under the playhead (REN-115)
-    const [ci, srcT] = outToSource(projRef.current, t)
-    const src = ci != null ? (projRef.current.clips[ci].src || 'main') : 'main'
+    // Land in the next EMPTY stretch at or after the playhead (REN-156), never
+    // on top of a caption that is already there. He adds captions with the
+    // playhead wherever he last looked, which is usually inside one.
+    const want = 1.2
+    const slot = freeSlotAt(proj, +timeStore.get().toFixed(2), null, 0.6)
+    if (!slot) {
+      showToast('No empty space left between the captions — move or shorten one first')
+      return
+    }
+    const t = slot[0]
+    const dur = Math.min(want, slot[1] - slot[0])
+    // anchor the new caption to the source under that instant (REN-115)
+    const [ci, srcT] = outToSource(proj, t)
+    const src = ci != null ? (proj.clips[ci].src || 'main') : 'main'
     const s0 = ci != null ? srcT : 0
     mutate((p) => {
       p.captions.push({ id, x: 50, y: 76, size: 3.4, font: 'Helvetica Bold', color: '#FFFFFF',
                         dim: 0.45, mode: 'karaoke', capAnchor: 'source', src,
-                        words: mkWordsSrcCovered(p, src, 'new caption here', s0, s0 + 2) })
+                        words: mkWordsSrcCovered(p, src, 'new caption here', s0, s0 + dur) })
     })
     setSel({ type: 'cap', id })
-  }, [mutate])
+    timeStore.set(t)
+  }, [mutate, showToast])
+
+  // ── one caption's LOOK is the whole video's look (REN-155) ────────────────
+  //
+  // Inverts the old default. Captions are a style, not eight separate
+  // decisions: he moves one up and means "captions sit here". The toggle is ON
+  // by default and remembered, so he never has to re-arm it; turning it off
+  // makes the next change apply to the selected caption alone.
+  //
+  // WORDS and TIMES are never spread — those are what each caption IS.
+  const CAP_LOOK = ['x', 'y', 'size', 'font', 'color', 'dim', 'mode', 'maxW', 'shadow', 'stroke', 'bg']
+  const [capApplyAll, setCapApplyAllState] = useState(
+    () => localStorage.getItem('vs-cap-all') !== '0')
+  const setCapApplyAll = useCallback((on) => {
+    setCapApplyAllState(on)
+    try { localStorage.setItem('vs-cap-all', on ? '1' : '0') } catch { /* private mode */ }
+  }, [])
+  const spreadCapLook = useCallback((p, from) => {
+    for (const o of p.captions || []) {
+      if (o.id === from.id) continue
+      for (const k of CAP_LOOK) {
+        if (k in from) o[k] = structuredClone(from[k])
+        else delete o[k]
+      }
+    }
+  }, [])
+
+  // ── Enter splits a caption in two (REN-158) ───────────────────────────────
+  //
+  // The cut in TIME falls between the last word of the first half and the first
+  // word of the second, because each half keeps the word timings it already
+  // had. Splitting the duration in half instead would desync both halves from
+  // the audio. One mutate call, so one ⌘Z undoes the whole split.
+  const splitCaption = useCallback((capId, wordIndex) => {
+    if (typeLocked(projRef.current, 'cap')) { showToast('Captions track is locked'); return }
+    let made = null
+    mutate((p) => {
+      const i = p.captions.findIndex((c) => c.id === capId)
+      if (i < 0) return
+      const cap = p.captions[i]
+      const ws = cap.words || []
+      if (ws.length < 2) return
+      const k = Math.max(1, Math.min(Math.round(wordIndex), ws.length - 1))
+      const a = { ...structuredClone(cap), words: ws.slice(0, k), edited: true }
+      const b = { ...structuredClone(cap), id: uid('g'), words: ws.slice(k), edited: true }
+      p.captions.splice(i, 1, a, b)
+      made = b.id
+    })
+    if (made) setSel({ type: 'cap', id: made })
+    else showToast('Put the cursor between two words to split the caption')
+  }, [mutate, showToast])
+
+  // ── move / stretch a caption on the timeline (REN-157) ────────────────────
+  //
+  // The words live in SOURCE seconds, so a timeline move becomes a shift of
+  // every word by the same amount — the karaoke spacing between them is
+  // untouched, only where the group sits changes. It stops at the neighbours
+  // instead of pushing them (REN-156: nothing may ever overlap).
+  const moveCaption = useCallback((capId, newStart, edge = null) => {
+    if (typeLocked(projRef.current, 'cap')) { showToast('Captions track is locked'); return }
+    mutate((p) => {
+      const cap = p.captions.find((c) => c.id === capId)
+      if (!cap || cap.capAnchor !== 'source') return
+      const span = capTimelineSpan(p, cap)
+      if (!span) return
+      const [lo, hi] = capLimits(p, capId, (span[0] + span[1]) / 2)
+      const ws = cap.words || []
+      if (!ws.length) return
+      const s0 = ws[0].t0, s1 = ws[ws.length - 1].t1
+      const MIN = CAP_MIN
+      // Snapshot, then CHECK the result rather than trusting the limits: the
+      // neighbour bounds only look at the two captions either side, and a long
+      // drag jumps over a whole run of them, flattening one in the middle. The
+      // rule is about the finished state, so it is enforced on the finished
+      // state — the move is refused if any caption would end up unreadable.
+      const before = ws.map((w) => ({ t0: w.t0, t1: w.t1 }))
+      const revert = () => ws.forEach((w, i) => { w.t0 = before[i].t0; w.t1 = before[i].t1 })
+      // every OTHER caption must stay readable; this one may be short if it
+      // already was
+      const wasTiny = new Set(capSpans(p).filter((sp) => sp.b - sp.a < MIN - 1e-3).map((sp) => sp.id))
+      const legal = () => capSpans(p).every((sp) =>
+        sp.b - sp.a >= MIN - 1e-3 || wasTiny.has(sp.id))
+
+      if (edge === null) {                       // drag the whole group
+        const len = span[1] - span[0]
+        const want = Math.max(lo, Math.min(newStart, hi - len))
+        const [ci, srcT] = outToSource(p, want)
+        if (ci == null || (p.clips[ci].src || 'main') !== (cap.src || 'main')) return
+        const shift = srcT - s0
+        for (const w of ws) { w.t0 = +(w.t0 + shift).toFixed(3); w.t1 = +(w.t1 + shift).toFixed(3) }
+        if (!legal()) revert()
+        return
+      }
+      // stretch one edge: scale the words inside the new span so the karaoke
+      // keeps its proportions
+      const [ci, srcT] = outToSource(p, Math.max(lo, Math.min(newStart, hi)))
+      if (ci == null || (p.clips[ci].src || 'main') !== (cap.src || 'main')) return
+      let a = s0, b = s1
+      if (edge === 'l') a = Math.min(srcT, s1 - MIN)
+      else b = Math.max(srcT, s0 + MIN)
+      const oldLen = Math.max(1e-3, s1 - s0), newLen = Math.max(MIN, b - a)
+      const k = newLen / oldLen
+      for (const w of ws) {
+        w.t0 = +(a + (w.t0 - s0) * k).toFixed(3)
+        w.t1 = +(a + (w.t1 - s0) * k).toFixed(3)
+      }
+      if (!legal()) revert()
+    })
+  }, [mutate, showToast])
 
   const addText = useCallback(() => {
     const t = +timeStore.get().toFixed(1)
@@ -730,6 +853,49 @@ export function useStudio() {
       setBgJob(null)
     }
   }, [flushSave, mutate])
+
+  // Background removal for EVERY clip (REN-163). One clip at a time on purpose:
+  // segbg is a segmentation model per frame, and starting eleven of them at once
+  // would take the machine down. Progress says which clip it is on and the
+  // button becomes Stop — a silent multi-minute freeze on a long video would be
+  // worse than the one-clip-at-a-time behaviour it replaces.
+  const bgAllStop = useRef(false)
+  const processBgAll = useCallback(async () => {
+    const pid = pidRef.current
+    await flushSave()
+    const ids = (projRef.current?.clips || []).filter((c) => c.bg).map((c) => c.id)
+    if (!ids.length) { showToast('No clip has background removal turned on'); return }
+    bgAllStop.current = false
+    let done = 0
+    for (const clipId of ids) {
+      if (bgAllStop.current || pidRef.current !== pid) break
+      const at = projRef.current?.clips.find((x) => x.id === clipId)
+      if (!at?.bg) continue
+      const jobIn = at.in, jobOut = at.out
+      setBgJob(clipId)
+      setBgJobAll({ done, total: ids.length })
+      setBgJobPct(0)
+      try {
+        const { job } = await api.segbg(pid, clipId)
+        const st = await pollJob(job, (j) => setBgJobPct(Math.round(100 * j.progress / (j.total || 1))))
+        if (st.status === 'done' && st.result && pidRef.current === pid) {
+          mutate((p) => {
+            const c = p.clips.find((x) => x.id === clipId)
+            if (c?.bg) {
+              c.bg.processed = true
+              c.bg._cache = { path: st.result, in: jobIn, out: jobOut }
+              c.bg.stale = c.in !== jobIn || c.out !== jobOut
+            }
+          }, false)
+        }
+      } catch { /* one clip failing must not abandon the rest */ }
+      done++
+    }
+    setBgJob(null)
+    setBgJobAll(null)
+    if (bgAllStop.current) showToast(`Stopped — ${done} of ${ids.length} clips processed`)
+  }, [flushSave, mutate, showToast])
+  const stopBgAll = useCallback(() => { bgAllStop.current = true }, [])
 
   // ---------- face retouch preview (REN-84) ----------
   // Face track for a source, generated on demand, kept in runtime state (never
@@ -1289,7 +1455,9 @@ export function useStudio() {
     pxPerSec, setPxPerSec, sel, setSel, saveState, modal, setModal,
     fullscreen, setFullscreen, importing, vw, isMobile: vw < 760,
     menuOpen, setMenuOpen, compare, setCompare, inlineEdit, setInlineEdit,
-    exp, transc, bgJob, bgJobPct, rtJob, rtJobPct, faceTracks, detectFace, processRt,
+    exp, transc, bgJob, bgJobPct, bgJobAll, processBgAll, stopBgAll,
+    rtJob, rtJobPct, faceTracks, detectFace, processRt,
+    capApplyAll, setCapApplyAll, spreadCapLook, splitCaption, moveCaption,
     toast, busyMedia, showToast, dropMedia, pasteImage, classifyFile, appVersion,
     leftTab, setLeftTab, transcripts, transcribing, loadTranscripts, transcribeSources,
     transcriptDelete, transcriptRestore, transcriptSplitSource,
