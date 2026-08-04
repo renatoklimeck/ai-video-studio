@@ -116,6 +116,16 @@ if [ ! -f "$ROOT/render/models/face_detection_yunet_2023mar.onnx" ]; then
     warn "could not fetch the face detector — rehearsal detection by framing will be off"
 fi
 
+# face landmarks — the face retouch masks the skin from these 478 points
+# (REN-176). Ships with the repo; healed here the same way. Apache 2.0, Google.
+# Without it the retouch still works, on the older geometric mask.
+if [ ! -f "$ROOT/render/models/face_landmarker.task" ]; then
+  mkdir -p "$ROOT/render/models"
+  curl -fL --progress-bar -o "$ROOT/render/models/face_landmarker.task" \
+    "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task" || \
+    warn "could not fetch the face landmarks — retouch falls back to the rougher mask"
+fi
+
 # ── 5. https certificate ──────────────────────────────────────────────────────
 step "5/8  local https certificate"
 if [ -f "$ROOT/.certs/server.pem" ] && [ -f "$ROOT/.certs/server-key.pem" ]; then

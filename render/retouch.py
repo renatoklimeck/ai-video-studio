@@ -39,6 +39,7 @@ excludes the eye/mouth landmark regions and high-gradient areas (edge map), so
 brows, lashes, lips and hair edges are never smoothed. The mask is feathered
 and temporally smoothed (EMA) to avoid shimmer.
 """
+import threading
 from pathlib import Path
 
 import cv2
@@ -54,6 +55,81 @@ DETECT_W = 480.0
 MISS_KEEP = 8  # detection attempts (every DETECT_EVERY frames) ≈ 1.6s at 30fps
 MODEL = Path(__file__).parent / "models" / "face_detection_yunet_2023mar.onnx"
 
+# ── the face, as a shape instead of a guess (REN-176) ────────────────────────
+#
+# The skin used to be an ELLIPSE intersected with a generic skin-colour range,
+# minus everything with a strong gradient. Measured on his own face that reached
+# 48% of the face oval: no nose, no mouth, nothing around the beard, not even
+# the forehead highlight — whatever the sliders said. Hand-tuning got it to
+# 57-75%, and it was still a guess with holes in it.
+#
+# MediaPipe's face landmarker gives 478 points, so the face becomes a POLYGON
+# and the eyes, brows and lips become polygons that are cut out of it by name
+# rather than by gradient. Apache 2.0, Google's own training data — the face
+# parsing models that would do the same job all descend from CelebAMask-HQ,
+# which is licensed for non-commercial research and this app is sold.
+LANDMARK_MODEL = Path(__file__).parent / "models" / "face_landmarker.task"
+LM_W = 256.0        # landmarks are found on a downscale; the mesh is smooth
+_LM_CACHE = {}      # one landmarker per process — building it costs ~1.4s
+# The landmarker is one native object and the server answers on threads. Two
+# preview requests hitting it at once measured 3.3s; serialised they are 95ms.
+_LM_LOCK = threading.Lock()
+
+
+def _lm_engine():
+    """The shared landmarker, or None when mediapipe/the model is unavailable —
+    in which case everything falls back to the geometric mask."""
+    if "e" in _LM_CACHE:
+        return _LM_CACHE["e"]
+    eng = None
+    try:
+        if LANDMARK_MODEL.exists():
+            from mediapipe.tasks import python as mpp  # noqa: PLC0415
+            from mediapipe.tasks.python import vision  # noqa: PLC0415
+            eng = vision.FaceLandmarker.create_from_options(
+                vision.FaceLandmarkerOptions(
+                    base_options=mpp.BaseOptions(model_asset_path=str(LANDMARK_MODEL)),
+                    running_mode=vision.RunningMode.IMAGE, num_faces=1))
+    except Exception as e:  # noqa: BLE001 — never let this break a render
+        print(f"retouch: face landmarks unavailable ({e}) — using the geometric mask",
+              flush=True)
+        eng = None
+    _LM_CACHE["e"] = eng
+    return eng
+
+
+def _ring(conns):
+    """Connection pairs -> one ordered ring of point indices, so it can be
+    filled as a polygon. MediaPipe hands these out as an unordered edge set."""
+    nxt = {c.start: c.end for c in conns}
+    start = next(iter(nxt))
+    ring, cur = [start], nxt[start]
+    while cur != start and cur in nxt and len(ring) <= len(nxt):
+        ring.append(cur)
+        cur = nxt[cur]
+    return ring
+
+
+_RINGS = {}
+
+
+def _rings():
+    """Ordered index rings for the parts we care about, built once."""
+    if _RINGS:
+        return _RINGS
+    try:
+        from mediapipe.tasks.python.vision.face_landmarker import (  # noqa: PLC0415
+            FaceLandmarksConnections as C)
+        _RINGS["oval"] = _ring(C.FACE_LANDMARKS_FACE_OVAL)
+        _RINGS["eyeL"] = _ring(C.FACE_LANDMARKS_LEFT_EYE)
+        _RINGS["eyeR"] = _ring(C.FACE_LANDMARKS_RIGHT_EYE)
+        _RINGS["browL"] = _ring(C.FACE_LANDMARKS_LEFT_EYEBROW)
+        _RINGS["browR"] = _ring(C.FACE_LANDMARKS_RIGHT_EYEBROW)
+        _RINGS["lips"] = _ring(C.FACE_LANDMARKS_LIPS)
+    except Exception:  # noqa: BLE001
+        _RINGS["oval"] = []
+    return _RINGS
+
 
 class Retouch:
     def __init__(self, rt):
@@ -67,6 +143,83 @@ class Retouch:
         self.miss = MISS_KEEP + 1
         self.frame_i = -1
         self.prev_mask = None
+        self.pts = None          # EMA'd 478 landmarks, in FRAME pixels
+
+    def seed(self, face, pts):
+        """Hand in an already-computed face box and landmark set.
+
+        The live preview re-renders the SAME frame every time a slider moves,
+        and neither the box nor the mesh depends on the slider — recomputing
+        them per request cost 275ms-3.3s and made the preview feel broken. The
+        caller caches them next to the decoded frame and passes them here."""
+        self.face, self.pts = face, pts
+        self.miss = 0
+        self.frame_i = 1         # not a multiple of DETECT_EVERY: skip detection
+        return self
+
+    # ---------- landmarks ----------
+
+    def _landmarks(self, frame):
+        """478 face points in frame pixels, EMA-smoothed, or None.
+
+        Run on a downscale: the mesh is a smooth shape, and finding it at 640px
+        costs a fraction of full resolution for a boundary that lands in the
+        same place once it is scaled back up."""
+        eng = _lm_engine()
+        if eng is None:
+            return
+        try:
+            import mediapipe as mp  # noqa: PLC0415
+            H, W = frame.shape[:2]
+            sc = min(1.0, LM_W / max(1.0, W))
+            small = (cv2.resize(frame, (0, 0), fx=sc, fy=sc, interpolation=cv2.INTER_AREA)
+                     if sc < 1.0 else frame)
+            img = mp.Image(image_format=mp.ImageFormat.SRGB,
+                           data=cv2.cvtColor(small, cv2.COLOR_BGR2RGB))
+            with _LM_LOCK:
+                res = eng.detect(img)
+            if not res.face_landmarks:
+                return
+            pts = np.array([[p.x * W, p.y * H] for p in res.face_landmarks[0]],
+                           dtype=np.float32)
+        except Exception:  # noqa: BLE001 — a bad frame must not kill the render
+            return
+        # same EMA as the box: the mesh jitters a little frame to frame and an
+        # unsmoothed mask edge shimmers on skin
+        self.pts = pts if self.pts is None or self.pts.shape != pts.shape \
+            else 0.6 * self.pts + 0.4 * pts
+
+    def _mask_from_points(self, shape, off_x, off_y, fw):
+        """Skin as a POLYGON: the face oval, minus eyes, brows and lips by name.
+
+        Returns None when there are no landmarks, so the caller falls back."""
+        rings = _rings()
+        if self.pts is None or not rings.get("oval"):
+            return None
+        h, w = shape
+        p = self.pts - np.array([off_x, off_y], dtype=np.float32)
+
+        def poly(idx):
+            return p[idx].astype(np.int32).reshape(-1, 1, 2)
+
+        mask = np.zeros((h, w), np.uint8)
+        cv2.fillPoly(mask, [poly(rings["oval"])], 255)
+        # Pull the boundary IN a little. The oval runs along the hairline and
+        # the jaw, and treating right up to it bleeds the effect into hair and
+        # into the neck behind the chin.
+        er = max(3, int(fw * 0.035)) | 1
+        mask = cv2.erode(mask, np.ones((er, er), np.uint8))
+        # cut out what must never be smoothed, each by its own outline
+        for key, grow in (("eyeL", 0.030), ("eyeR", 0.030),
+                          ("browL", 0.035), ("browR", 0.035), ("lips", 0.020)):
+            if not rings.get(key):
+                continue
+            hole = np.zeros((h, w), np.uint8)
+            cv2.fillPoly(hole, [poly(rings[key])], 255)
+            g = max(3, int(fw * grow)) | 1
+            hole = cv2.dilate(hole, np.ones((g, g), np.uint8))
+            mask[hole > 0] = 0
+        return mask
 
     # ---------- detection ----------
 
@@ -98,9 +251,49 @@ class Retouch:
         x1 = int(min(W, cx + rw / 2)); y1 = int(min(H, cy + rh / 2))
         return x0, y0, x1, y1
 
-    def _masks(self, roi, fx, fy, fw, fh, eyes, mouth):
+    def _masks(self, roi, fx, fy, fw, fh, eyes, mouth, off=(0, 0)):
         """(skin, eye, under-eye) float masks [0..1] at roi resolution."""
         h, w = roi.shape[:2]
+
+        # The landmark polygon when we have it (REN-176). It already excludes
+        # eyes, brows and lips by name, so none of the colour-range guessing
+        # below is needed and none of its holes appear.
+        lm_mask = self._mask_from_points((h, w), off[0], off[1], fw)
+        if lm_mask is not None:
+            skin_f = cv2.GaussianBlur(
+                lm_mask, (max(3, int(fw * 0.05)) | 1,) * 2, 0).astype(np.float32) / 255.0
+            # BEARD AND STUBBLE ARE NOT SKIN (REN-176).
+            #
+            # The polygon is the whole face, so it includes the beard — and
+            # smoothing that softened it: texture fell to 80% of the original
+            # against 91% with the old mask, which is a step backwards however
+            # good the outline is. No classifier needed: skin is quiet in the
+            # high frequencies and hair is loud, so the local texture energy
+            # separates them by itself, and it also protects stubble, brow
+            # strays and the hairline fuzz that no polygon covers.
+            g = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            hf = g - cv2.GaussianBlur(g, (0, 0), max(1.5, fw / 55.0))
+            energy = cv2.GaussianBlur(np.abs(hf), (0, 0), max(2.0, fw / 40.0))
+            sel = skin_f > 0.5
+            if sel.any():
+                med = float(np.median(energy[sel]))
+                # 1 on quiet skin, falling to 0 at three times the face's own
+                # median energy — a relative line, so a soft-focus lens and a
+                # sharp one both land in the same place
+                hair = np.clip((energy - med * 1.35) / max(1e-3, med * 1.65), 0, 1)
+                skin_f = skin_f * (1.0 - 0.9 * hair)
+            er = max(4, int(fw * 0.14))
+            eye_m = np.zeros((h, w), np.float32)
+            under_m = np.zeros((h, w), np.float32)
+            for (ex, ey) in eyes:
+                cv2.ellipse(eye_m, (int(ex), int(ey)), (int(er * 0.85), int(er * 0.5)),
+                            0, 0, 360, 1.0, -1)
+                cv2.ellipse(under_m, (int(ex), int(ey + er * 0.95)),
+                            (int(er * 0.95), int(er * 0.55)), 0, 0, 360, 1.0, -1)
+            ke = max(3, int(fw * 0.05)) | 1
+            return (skin_f, cv2.GaussianBlur(eye_m, (ke, ke), 0),
+                    cv2.GaussianBlur(under_m, (ke, ke), 0))
+
         mask = np.zeros((h, w), np.uint8)
         cv2.ellipse(mask, (int(fx + fw / 2), int(fy + fh * 0.50)),
                     (int(fw * 0.60), int(fh * 0.72)), 0, 0, 360, 255, -1)
@@ -183,6 +376,7 @@ class Retouch:
         self.frame_i += 1
         if self.frame_i % DETECT_EVERY == 0:
             self._detect(frame)
+            self._landmarks(frame)   # same cadence as the box (REN-176)
         if self.face is None or self.miss > MISS_KEEP:
             self.prev_mask = None
             return frame
@@ -196,7 +390,7 @@ class Retouch:
         eyes = [(self.face[4] - x0, self.face[5] - y0), (self.face[6] - x0, self.face[7] - y0)]
         mouth = (self.face[8] - x0, self.face[9] - y0)
 
-        mask, eye_m, under_m = self._masks(roi, fx, fy, fw, fh, eyes, mouth)
+        mask, eye_m, under_m = self._masks(roi, fx, fy, fw, fh, eyes, mouth, off=(x0, y0))
         if self.prev_mask is not None and self.prev_mask.shape == mask.shape:
             mask = 0.55 * mask + 0.45 * self.prev_mask  # temporal stability
         self.prev_mask = mask

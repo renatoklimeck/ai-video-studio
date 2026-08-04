@@ -1948,8 +1948,8 @@ async def rt_frame(pid: str, request: Request):
     # quantise to ~one frame so scrubbing a few ms does not miss the cache
     key = (str(src), int(src.stat().st_mtime), round(t, 2), want_w)
     with RT_FRAME_LOCK:
-        frame = RT_FRAME_CACHE.get(key)
-    if frame is None:
+        hit = RT_FRAME_CACHE.get(key)
+    if hit is None:
         cap = cv2.VideoCapture(str(src))
         cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t) * 1000)
         ok, frame = cap.read()
@@ -1959,12 +1959,21 @@ async def rt_frame(pid: str, request: Request):
         if want_w and frame.shape[1] > want_w:
             sc = want_w / frame.shape[1]
             frame = cv2.resize(frame, (0, 0), fx=sc, fy=sc, interpolation=cv2.INTER_AREA)
+        # Find the face and the mesh ONCE per instant and keep them with the
+        # frame. Neither depends on a slider, and recomputing the landmarks on
+        # every request cost 275ms-3.3s — the preview stopped feeling live the
+        # moment landmarks went in (REN-176).
+        probe = RT.Retouch({})
+        probe._detect(frame)
+        probe._landmarks(frame)
+        hit = (frame, probe.face, probe.pts)
         with RT_FRAME_LOCK:
             if len(RT_FRAME_CACHE) > 24:      # a handful of instants is plenty
                 RT_FRAME_CACHE.clear()
-            RT_FRAME_CACHE[key] = frame
+            RT_FRAME_CACHE[key] = hit
 
-    out = RT.Retouch(rt).apply(frame.copy())
+    frame, face, pts = hit
+    out = RT.Retouch(rt).seed(face, pts).apply(frame.copy())
     ok, buf = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), 86])
     if not ok:
         raise HTTPException(500, "encode failed")
