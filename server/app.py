@@ -624,8 +624,24 @@ def run_take_pipeline(pid, d: Path, model_key, effort):
     # spend the round trip when it cannot cover every line.
     try:
         from cleanup import picks_from_script  # noqa: PLC0415
-        auto, trusted = picks_from_script(d, src_key, table["takes"], script_lines)
+        auto, trusted, alts = picks_from_script(d, src_key, table["takes"], script_lines)
         if len(auto) == len(script_lines):
+            # THE EYES. Numbers catch the obvious rehearsal — out of position,
+            # mumbled, abandoned. They cannot see eyes closed, a hand in shot or
+            # the wrong expression; only looking at the frame does. Worth one
+            # image round trip, and ONLY where it can change the answer: on a
+            # line with a single usable attempt, rejecting it buys nothing.
+            swapped = 0
+            if alts:
+                rejected = set(visual_check(d, table, {"picks": auto}, model_key) or [])
+                for p in auto:
+                    if not (rejected & set(p["takes"])):
+                        continue
+                    for other in alts.get(p["line"]) or []:
+                        if not (rejected & set(other)):
+                            p["takes"] = other
+                            swapped += 1
+                            break
             res = assemble(d, {"src": src_key, "picks": auto}, trusted=trusted)
             if res.get("ok"):
                 try:
@@ -636,7 +652,9 @@ def run_take_pipeline(pid, d: Path, model_key, effort):
                         f"({res['duration']:.0f}s) cobrindo as {len(script_lines)} linhas do "
                         f"roteiro, e {res['captions']} grupos de legenda gerados do corte final."
                         + (f" Ouvi {len(trusted)} take(s) isolados para conferir uma flag que "
-                           "estava errada." if trusted else ""))
+                           "estava errada." if trusted else "")
+                        + (f" Olhei os frames e troquei {swapped} take(s) por uma versão melhor "
+                           "enquadrada." if swapped else ""))
     except Exception:  # noqa: BLE001 — never let the shortcut break the real path
         pass
 
@@ -724,7 +742,7 @@ Output ONLY compact JSON, nothing else: {{"picks":[{{"line":1,"takes":[3]}}]}}""
         # enough to dead-end a whole edit whose correct cut was sitting there).
         try:
             from cleanup import picks_from_script  # noqa: PLC0415
-            auto, trusted = picks_from_script(d, src_key, table["takes"], script_lines)
+            auto, trusted, _alts = picks_from_script(d, src_key, table["takes"], script_lines)
             if auto:
                 res2 = assemble(d, {"src": src_key, "picks": auto}, trusted=trusted)
                 if res2.get("ok"):

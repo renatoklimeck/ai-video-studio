@@ -672,20 +672,34 @@ def picks_from_script(pdir, src_key, takes, script_lines):
     by_id = {t["id"]: t for t in takes}
 
     def flagged(tid):
+        """Every measured reason a take is not the one to use.
+
+        OFF-FRAME and no-face belong here as much as the audio ones: a rehearsal
+        is often him half out of shot, reading rather than addressing the camera.
+        They were missing, and on three real recordings that only mattered for
+        one take — because a take he was drifting out of is usually mumbled too —
+        but "usually" is not a reason to throw away a signal already measured."""
         t = by_id.get(tid) or {}
-        return bool(t.get("aborted")) or any("QUIET" in f for f in t.get("flags") or [])
+        return (bool(t.get("aborted"))
+                or any(f.startswith(("QUIET", "OFF-FRAME", "no face"))
+                       for f in t.get("flags") or []))
 
     by_line = {}
     for a in atts:
         if a["complete"]:
             by_line.setdefault(a["line"], []).append(a)
 
-    picks, trusted, open_lines = [], set(), []
+    picks, trusted, open_lines, alts = [], set(), [], {}
     for line in range(len(script_lines)):
         clean = [a for a in by_line.get(line, [])
                  if not any(flagged(t) for t in a["takes"])]
         if clean:
+            # the LAST complete one, which is the rule he stated: the last good
+            # take is the one he settled on before moving on
             picks.append({"line": line + 1, "takes": list(clean[-1]["takes"])})
+            # …and what to fall back to if a look at the frame rejects it
+            if len(clean) > 1:
+                alts[line + 1] = [list(a["takes"]) for a in reversed(clean[:-1])]
         else:
             open_lines.append(line)
 
@@ -745,7 +759,7 @@ def picks_from_script(pdir, src_key, takes, script_lines):
                     trusted.update(chain)
                 break
     picks.sort(key=lambda p: p["line"])
-    return picks, sorted(trusted)
+    return picks, sorted(trusted), alts
 
 
 def uncovered_speech(pdir, src_key, takes):
