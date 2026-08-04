@@ -75,13 +75,19 @@ captions/texts/overlays/audios são segundos de **TIMELINE** (não da fonte).
     "preset": "natural",         // "natural" | "studio" | "custom"
     "intensity": 50,             // 0–100, mestre — escala o efeito todo (default 50
                                  // ao ativar; fine-tunes começam em 0)
-    "smooth": 30, "even": 25, "blem": 20, "shine": 15,
+    "smooth": 30, "even": 25, "blem": 20, "dewrinkle": 20, "shine": 15,
     "plump": 10, "eyes": 20, "circles": 10,   // fine-tune 0–100
-    "scope": "clip",             // "clip" | "all"
+                                 // dewrinkle (REN-160): levanta LINHAS escuras na
+                                 // banda entre poro e sombra; poro fica intacto
+    "scope": "all",              // "all" (default) | "clip"
+                                 // "clip" = fixado: uma mudança global NÃO o
+                                 // sobrescreve. Só apertar "All clips" o toma.
     "processed": true,           // preview processado (real pipeline) disponível
     "stale": false,              // clipe/sliders mudaram depois do processamento
     "_cache": { "path": "cache/retouch_c1.mp4", "in": 0.0, "out": 5.2,
-                "sig": "50,30,25,20,15,10,20,10" }  // interno · in/out/sig p/ validar frescor
+                "sig": "50,30,25,20,20,15,10,20,10" }  // interno · in/out/sig p/ validar frescor
+                                 // sig segue RT_KEYS em store.js — um slider fora
+                                 // dessa lista deixa o preview processado velho
   }
 }
 ```

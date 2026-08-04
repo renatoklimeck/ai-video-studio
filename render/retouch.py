@@ -14,8 +14,11 @@ Slider -> operation mapping (all strengths scaled by the master m below):
               >=70%, so skin evens out without going plastic
   even      : LAB a/b low-frequency variation pulled toward the skin mean
               (evens redness/blotches without changing luminance = no whitening)
-  blem      : median-filtered plate blended in only where a pixel is a small
-              dark outlier vs its neighborhood (spots, blemishes)
+  blem      : median plate built on a face normalised to 300px (so the kernel
+              means the same at preview and export res), blended in only where
+              a pixel is a dark OR red outlier vs its neighbourhood
+  dewrinkle : dark lines in the band between pores and shading (difference of
+              two gaussians, dark side only) lifted toward the surrounding skin
   shine     : specular highlights (V above the skin's 85th percentile)
               compressed toward that percentile
   plump     : subtle soft-glow (lighten-only blend of a gaussian layer) for a
@@ -157,7 +160,7 @@ class Retouch:
 
         m = 0.4 + 0.6 * (rt.get("intensity", 35) / 100.0)  # master scale
         s = {k: rt.get(k, 0) / 100.0 * m for k in
-             ("smooth", "even", "blem", "shine", "plump", "eyes", "circles")}
+             ("smooth", "even", "blem", "shine", "plump", "eyes", "circles", "dewrinkle")}
         src = roi.astype(np.float32)
         out = src.copy()
         sigma = max(2.0, fw / 90.0)
@@ -202,12 +205,48 @@ class Retouch:
             out = cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR).astype(np.float32)
 
         if s["blem"] > 0.01:
-            k = max(3, int(fw / 40)) | 1
-            med = cv2.medianBlur(np.clip(out, 0, 255).astype(np.uint8), k).astype(np.float32)
-            g_out = out.mean(axis=2)
-            g_med = med.mean(axis=2)
-            spot = np.clip((g_med - g_out - 6) / 24.0, 0, 1)[:, :, None]  # dark outliers
-            out = out + (med - out) * spot * s["blem"]
+            # REBUILT (REN-160). The old version was measured at 0.05/255 on
+            # export — nothing — and 0.96 at preview resolution, i.e. it did two
+            # different things depending on where it ran. Both came from
+            # `k = fw/40`: the median kernel has to be BIGGER than the spot it
+            # removes, and fw/40 is 13px on a 555px face, smaller than a real
+            # blemish; at preview res the same expression collapses to 3, where
+            # a median is just a denoiser.
+            #
+            # So the plate is built on a face NORMALISED to a fixed width. A
+            # kernel is then a fixed fraction of a face at every resolution, and
+            # preview and export finally agree.
+            NB = 300.0
+            sc = min(1.0, NB / max(1.0, fw))
+            cur = np.clip(out, 0, 255).astype(np.uint8)
+            small = (cv2.resize(cur, (0, 0), fx=sc, fy=sc, interpolation=cv2.INTER_AREA)
+                     if sc < 1.0 else cur)
+            if min(small.shape[:2]) >= 12:
+                med_s = cv2.medianBlur(small, 11)     # ~4% of the face = a spot
+                med = (cv2.resize(med_s, (cur.shape[1], cur.shape[0]),
+                                  interpolation=cv2.INTER_LINEAR).astype(np.float32)
+                       if sc < 1.0 else med_s.astype(np.float32))
+                # a blemish is DARKER than the skin around it, REDDER, or both —
+                # judging on luminance alone missed the red ones entirely
+                dark = np.clip((med.mean(axis=2) - out.mean(axis=2) - 2.5) / 12.0, 0, 1)
+                la = cv2.cvtColor(cur, cv2.COLOR_BGR2LAB)[:, :, 1].astype(np.float32)
+                lm = cv2.cvtColor(np.clip(med, 0, 255).astype(np.uint8),
+                                  cv2.COLOR_BGR2LAB)[:, :, 1].astype(np.float32)
+                red = np.clip((la - lm - 1.5) / 6.0, 0, 1)
+                spot = np.maximum(dark, red)[:, :, None]
+                out = out + (med - out) * spot * s["blem"]
+
+        if s["dewrinkle"] > 0.01:
+            # Wrinkles are dark LINES at a scale between pores and shading: a
+            # forehead line is far wider than a pore and far narrower than the
+            # shadow under a brow. Isolate exactly that band (difference of two
+            # gaussians), keep only its dark side — a line, never a highlight —
+            # and lift it back toward the skin around it. Pores live below the
+            # small sigma and are untouched, so the face does not go plastic.
+            sig_a = max(1.2, fw / 120.0)
+            sig_b = max(3.0, fw / 28.0)
+            band = cv2.GaussianBlur(out, (0, 0), sig_a) - cv2.GaussianBlur(out, (0, 0), sig_b)
+            out = out - np.minimum(band, 0) * (0.8 * s["dewrinkle"])
 
         if s["shine"] > 0.01 and (mask > 0.5).any():
             hsv = cv2.cvtColor(np.clip(out, 0, 255).astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)

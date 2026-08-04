@@ -868,10 +868,14 @@ export default function Player({ s, onImportVideo }) {
   function retouchFilter(r) {
     const m = 0.4 + 0.6 * (r.intensity ?? 0) / 100
     const g = (k) => (r[k] ?? 0) / 100 * m
-    const blur = (g('smooth') * 1.4).toFixed(2)
+    // dewrinkle (REN-160) reads as a small extra softening plus a lift: the
+    // real pipeline only touches dark LINES, which CSS cannot express, so this
+    // approximates the direction of the change, not its selectivity
+    const blur = (g('smooth') * 1.4 + g('dewrinkle') * 0.5).toFixed(2)
     const sat = (1 - 0.18 * g('even') + 0.06 * g('plump')).toFixed(3)
-    const bright = (1 + 0.05 * g('plump') + 0.07 * g('eyes') + 0.05 * g('circles') - 0.05 * g('shine')).toFixed(3)
-    const contrast = (1 - 0.05 * g('blem') - 0.04 * g('even')).toFixed(3)
+    const bright = (1 + 0.05 * g('plump') + 0.07 * g('eyes') + 0.05 * g('circles')
+                    + 0.03 * g('dewrinkle') - 0.05 * g('shine')).toFixed(3)
+    const contrast = (1 - 0.05 * g('blem') - 0.04 * g('even') - 0.03 * g('dewrinkle')).toFixed(3)
     return `blur(${blur}px) saturate(${sat}) brightness(${bright}) contrast(${contrast})`
   }
   const faceMask = faceBox ? (() => {

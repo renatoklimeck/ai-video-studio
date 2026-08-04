@@ -41,16 +41,52 @@ function MaxWField({ value, onLive, onFocus }) {
   )
 }
 
-const RT_NATURAL = { preset: 'natural', intensity: 35, smooth: 30, even: 25, blem: 20, shine: 15, plump: 10, eyes: 20, circles: 10, scope: 'clip' }
-const RT_STUDIO = { preset: 'studio', intensity: 60, smooth: 55, even: 45, blem: 40, shine: 30, plump: 25, eyes: 35, circles: 25, scope: 'clip' }
+// scope 'all' by default (REN-162): a face is the same face in every take, so
+// retouching one clip and not the rest is almost never what he means.
+const RT_NATURAL = { preset: 'natural', intensity: 35, smooth: 30, even: 25, blem: 20, shine: 15, plump: 10, eyes: 20, circles: 10, dewrinkle: 20, scope: 'all' }
+const RT_STUDIO = { preset: 'studio', intensity: 60, smooth: 55, even: 45, blem: 40, shine: 30, plump: 25, eyes: 35, circles: 25, dewrinkle: 40, scope: 'all' }
 // On activate everything is zeroed (Renato's ask) EXCEPT Intensity, which is the
 // master scale — 50 = neutral so moving any fine-tune from 0 shows immediately.
 // Nothing changes on screen until a fine-tune leaves 0. ↺ resets to this.
-const RT_ZERO = { preset: 'custom', intensity: 50, smooth: 0, even: 0, blem: 0, shine: 0, plump: 0, eyes: 0, circles: 0, scope: 'clip' }
-const rtSig = (rt) => ['intensity', 'smooth', 'even', 'blem', 'shine', 'plump', 'eyes', 'circles'].map((k) => rt?.[k] ?? 0).join(',')
+const RT_ZERO = { preset: 'custom', intensity: 50, smooth: 0, even: 0, blem: 0, shine: 0, plump: 0, eyes: 0, circles: 0, dewrinkle: 0, scope: 'all' }
+
+// A clip is PINNED when its scope is 'clip': he set that clip on purpose, and a
+// global change must never overwrite it.
+//
+// The 2026-08-04 attempt lost work exactly here — it made the presets default to
+// scope 'all' and then had every slider move copy the look over EVERY other
+// clip unconditionally, so one drag erased a clip he had tuned by hand. The
+// guard, not the default, is the hard part.
+export const rtPinned = (c) => !!c.rt && c.rt.scope === 'clip'
+
+// `force` is the difference between him ASKING and him not asking.
+//
+//   force=false — a slider moved while the scope happens to be "all". Clips he
+//                 pinned to "This clip" are left alone; taking them over would
+//                 be work destroyed by a gesture he did not aim at them.
+//   force=true  — he pressed "All clips". That IS the instruction, so it lands
+//                 on every clip, pinned or not (and undo puts it back).
+//
+// Existing projects are why force exists: every clip in them carries the old
+// scope:'clip' default, so without it the button would silently do nothing.
+export function spreadRt(c, pp, force = false) {
+  const { _cache, processed, stale, ...tune } = c.rt   // look only, never cache/preview state
+  let n = 0
+  for (const o of pp.clips || []) {
+    if (o.id === c.id || (!force && rtPinned(o))) continue
+    o.rt = { ...structuredClone(tune), scope: 'all' }
+    n++
+  }
+  return n
+}
+// NOTE: the signature that decides whether a processed preview is still fresh
+// lives in store.js and is used from `s.rtSig`. It used to be duplicated here,
+// and adding a slider to one copy and not the other means a change he can see
+// on the sliders leaves a stale "✓ processed" preview on screen.
 const RT_SLIDERS = [
   ['smooth', 'Smooth skin'], ['even', 'Even tone'], ['blem', 'Clear blemishes'],
-  ['shine', 'De-shine'], ['plump', 'Plump'], ['eyes', 'Brighten eyes'], ['circles', 'Dark circles'],
+  ['dewrinkle', 'Soften lines'], ['shine', 'De-shine'], ['plump', 'Plump'],
+  ['eyes', 'Brighten eyes'], ['circles', 'Dark circles'],
 ]
 
 export default function Inspector({ s }) {
@@ -111,13 +147,19 @@ export default function Inspector({ s }) {
   const rtStrong = rt && RT_SLIDERS.some(([k]) => rt[k] > 40)
   const setRt = (field) => (e) => {
     const v = parseInt(e.target.value, 10) || 0
-    editLive((c) => {
+    editLive((c, pp) => {
       if (!c.rt) return
       c.rt[field] = v
       c.rt.preset = 'custom'
       if (c.rt.processed) c.rt.stale = true // tuning invalidates the processed preview
+      // while the scope is "all", the slider IS the whole video's look — but
+      // never touches a clip he pinned to itself (REN-162)
+      if (c.rt.scope === 'all') spreadRt(c, pp)
     })
   }
+  // how many OTHER clips are pinned to their own retouch — so the rule is
+  // visible instead of silent (REN-162)
+  const pinnedCount = (p.clips || []).filter((o) => o.id !== item?.id && rtPinned(o)).length
   // real face detection for the honest chip + live mask (runtime only)
   const rtSrc = rt ? (item.src || 'main') : null
   useEffect(() => {
@@ -126,7 +168,7 @@ export default function Inspector({ s }) {
   const track = rtSrc ? faceTracks[rtSrc] : null
   const faceInClip = track && (track.samples || []).some((sp) => sp.t >= item.in && sp.t <= item.out)
   const rtFresh = rt && rt.processed && !rt.stale && rt._cache &&
-    rt._cache.sig === rtSig(rt) && rt._cache.in === item.in && rt._cache.out === item.out
+    rt._cache.sig === s.rtSig(rt) && rt._cache.in === item.in && rt._cache.out === item.out
 
   // caption audio span — source seconds for source-anchored groups (REN-115),
   // timeline seconds for legacy
@@ -268,14 +310,20 @@ export default function Inspector({ s }) {
                             onClick={() => edit((c) => { c.rt = { ...RT_STUDIO, scope: c.rt.scope } })}>Studio</button>
                     <button className={rt.preset === 'custom' ? 'on' : ''} style={{ cursor: 'default' }}>Custom</button>
                   </div>
-                  <label className="slider-label rt-intensity">Intensity · {rt.intensity}
-                    <input type="range" min="0" max="100" step="1" value={rt.intensity}
+                  <label className="slider-label rt-intensity">Intensity · {rt.intensity ?? 50}
+                    <input type="range" min="0" max="100" step="1" value={rt.intensity ?? 50}
                            onPointerDown={beginGesture} onChange={setRt('intensity')} />
                   </label>
                   <div className="rt-finetune-label">Fine-tune</div>
+                  {/* `?? 0` is not cosmetic: a clip saved before a slider
+                      existed has no key for it, and `value={undefined}` makes
+                      React drop the input to uncontrolled — it then parks at the
+                      middle and READS 50 while the renderer, defaulting the
+                      missing key to 0, applies nothing. That is the "shows 50,
+                      applies 0" the previous attempt at dewrinkle shipped. */}
                   {RT_SLIDERS.map(([key, label]) => (
-                    <label key={key} className="slider-label">{label} · {rt[key]}
-                      <input type="range" min="0" max="100" step="1" value={rt[key]}
+                    <label key={key} className="slider-label">{label} · {rt[key] ?? 0}
+                      <input type="range" min="0" max="100" step="1" value={rt[key] ?? 0}
                              onPointerDown={beginGesture} onChange={setRt(key)} />
                     </label>
                   ))}
@@ -286,15 +334,30 @@ export default function Inspector({ s }) {
                     <button className={rt.scope !== 'all' ? 'on' : ''}
                             onClick={() => edit((c) => { c.rt.scope = 'clip' })}>This clip</button>
                     <button className={rt.scope === 'all' ? 'on' : ''}
-                            onClick={() => edit((c, pp) => {
-                              c.rt.scope = 'all'
-                              // copy only the LOOK to other clips — not this clip's
-                              // processed-preview state / cache pointer (would mislabel
-                              // them and alias this clip's cache file)
-                              const { _cache, processed, stale, ...tune } = c.rt
-                              pp.clips.forEach((o) => { if (o.id !== c.id) o.rt = structuredClone(tune) })
-                            })}>All clips</button>
+                            title={pinnedCount
+                              ? `Applies this look to every clip — including ${pinnedCount} set to “This clip”`
+                              : 'Applies this look to every clip'}
+                            onClick={() => {
+                              // pressing the button IS the instruction: it lands
+                              // everywhere. From then on, sliders spare pinned clips.
+                              edit((c, pp) => { c.rt.scope = 'all'; spreadRt(c, pp, true) })
+                              if (pinnedCount) {
+                                s.showToast(`Applied to every clip — ${pinnedCount} had their own retouch (⌘Z undoes it)`)
+                              }
+                            }}>
+                      All clips</button>
                   </div>
+                  {rt.scope === 'all' && pinnedCount > 0 && (
+                    <div className="foot-note">
+                      {pinnedCount} clip{pinnedCount > 1 ? 's keep' : ' keeps'} its own retouch —
+                      moving a slider here leaves {pinnedCount > 1 ? 'them' : 'it'} alone. Press
+                      “All clips” again to take {pinnedCount > 1 ? 'them' : 'it'} over.
+                    </div>
+                  )}
+                  {rt.scope !== 'all' && (
+                    <div className="foot-note">Only this clip. Changes made with “All clips”
+                      elsewhere will not overwrite it.</div>
+                  )}
                   {rtJob === item.id ? (
                     <div className="job-progress">
                       <div className="label">processing retouch preview… {rtJobPct}%</div>
