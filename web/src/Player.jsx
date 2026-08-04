@@ -979,7 +979,18 @@ export default function Player({ s, onImportVideo }) {
               <video ref={rtLiveRef} key={`rtlive-${clip.src || 'main'}`}
                      src={fileUrl(p, activeSrcObj?.proxy || activeSrcObj?.path)}
                      playsInline preload="auto" muted
-                     style={{ filter: retouchFilter(rt), ...(faceMask || {}), opacity: faceBox ? 1 : 0 }} />
+                     style={{ filter: retouchFilter(rt), ...(faceMask || {}),
+                                // ABOVE the source, or none of this is visible.
+                                // showOnly() gives the active base video z-index 1
+                                // and this sibling had z-index auto, which paints
+                                // UNDER it — so the opaque untouched source covered
+                                // the only layer that reacts to the sliders. That is
+                                // the whole reason face retouch looked dead: moving a
+                                // slider also marks the processed cache stale, which
+                                // drops the preview back to the raw source, with its
+                                // replacement hidden underneath.
+                                zIndex: 2,
+                                opacity: faceBox ? 1 : 0 }} />
             )}
           </div>
 
