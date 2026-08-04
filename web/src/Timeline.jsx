@@ -353,6 +353,34 @@ export default function Timeline({ s }) {
     )
   }
 
+  // Clicking ANYWHERE on the timeline moves the playhead there (REN-173).
+  //
+  // Only the ruler used to do it: clicking a clip selected the clip and left
+  // the cursor where it was, and clicking the empty part of a lane just cleared
+  // the selection. So there was no way to say "show me from here", which is the
+  // most basic thing a timeline does. Selecting and seeking are not
+  // alternatives — a click does both.
+  //
+  // Bound to the lane BODY, so the trim handles, the fade dots, the volume line
+  // and a caption drag (which stop propagation) keep their own behaviour and
+  // never yank the playhead mid-gesture.
+  // Measured against the LANE BODY, found from whatever was clicked: a clip
+  // stops propagation so it can select itself, so the handler often runs with
+  // the clip as its target and the clip's own left edge would put every click
+  // at the start of that clip.
+  const seekFromEvent = (e) => {
+    const el = e.currentTarget.closest?.('.tl-lanebody') || e.currentTarget
+    const body = el.getBoundingClientRect()
+    const t = Math.max(0, Math.min(dur, (e.clientX - body.left) / pps))
+    s.setPlaying(false)
+    s.setTime(+t.toFixed(3))
+  }
+  const laneDown = (e) => {
+    if (e.button != null && e.button !== 0) return
+    seekFromEvent(e)
+    if (e.target === e.currentTarget) setSel(null)
+  }
+
   const selectItem = (type, id) => {
     if (typeLocked(p, type)) return // locked track: not selectable (type 'clip' → 'video')
     setSel({ type, id })
@@ -426,13 +454,28 @@ export default function Timeline({ s }) {
     window.addEventListener('pointercancel', up)
   }
 
-  const elementLanes = [
-    { key: 'cap', items: (p.captions || []).map((c) => {
+  // Captions that overlap are STACKED, not hidden behind each other (REN-172).
+  // "+ Caption" no longer refuses when there is no gap, so a new one can land
+  // on top of an existing one — he has to be able to see that to fix it.
+  const capItems = (() => {
+    const items = (p.captions || []).map((c) => {
       const mat = materializeCap(p, c) // source-anchored → derive timeline span
       if (!mat) return null            // fully cut: not on the timeline
       const span = capSpan(mat) || [0, 1]
       return { id: c.id, t0: span[0], t1: span[1] - 0.15, label: (c.words || []).map((w) => w.w).join(' ') }
-    }).filter(Boolean) },
+    }).filter(Boolean).sort((a, b) => a.t0 - b.t0)
+    const rowEnds = []               // last end time used by each row
+    for (const it of items) {
+      let r = rowEnds.findIndex((end) => it.t0 >= end - 1e-3)
+      if (r < 0) { r = rowEnds.length; rowEnds.push(0) }
+      rowEnds[r] = it.t1
+      it.row = r
+    }
+    return { items, rows: Math.max(1, rowEnds.length) }
+  })()
+
+  const elementLanes = [
+    { key: 'cap', items: capItems.items, rows: capItems.rows },
     { key: 'text', items: (p.texts || []).map((x) => ({
       id: x.id, t0: x.t0, t1: x.t1, label: (x.text || '').replace(/\n/g, ' ') })) },
     { key: 'ov', items: (p.overlays || []).map((o) => ({
@@ -480,7 +523,7 @@ export default function Timeline({ s }) {
             <TrackHead lane={laneOf('video')} p={p} s={s} />
             <div className={`tl-lanebody videolane ${trackFlag(p, 'video', 'locked') ? 'locked' : ''} ${trackFlag(p, 'video', 'hidden') ? 'hidden' : ''}`}
                  style={{ width: tlWidth }}
-                 onPointerDown={(e) => { if (e.target === e.currentTarget) setSel(null) }}>
+                 onPointerDown={laneDown}>
               {(p.clips || []).map((c, i) => {
                 const isSel = sel?.type === 'clip' && sel.id === c.id
                 const src = p.sources?.[c.src || 'main']
@@ -494,7 +537,11 @@ export default function Timeline({ s }) {
                        className={`tl-clip ${c.bg ? 'hasbg' : ''} ${isSel ? 'sel' : ''}`}
                        style={{ left: Math.round(clipOutStart(p, i) * pps), height: heights.video, width: w }}
                        title={note || undefined}
-                       onPointerDown={(e) => { e.stopPropagation(); selectItem('clip', c.id) }}>
+                       onPointerDown={(e) => {
+                         e.stopPropagation()
+                         selectItem('clip', c.id)
+                         seekFromEvent(e)   // selecting and seeking are not alternatives (REN-173)
+                       }}>
                     <div className="frames-band">
                       {hasStrip ? (
                         <>
@@ -554,13 +601,16 @@ export default function Timeline({ s }) {
             const meta = laneOf(lane.key)
             const locked = trackFlag(p, meta.track, 'locked')
             const hidden = trackFlag(p, meta.track, 'hidden')
-            const h = heights[lane.key]
+            // a lane grows to fit its stacked rows (REN-172); one row = as before
+            const rows = lane.rows || 1
+            const rowH = heights[lane.key]
+            const h = rowH * rows + (rows - 1) * 2
             return (
               <div key={lane.key} className="tl-row" style={{ height: h }}>
                 <TrackHead lane={meta} p={p} s={s} />
                 <div className={`tl-lanebody ${locked ? 'locked' : ''} ${hidden ? 'hidden' : ''}`}
                      style={{ width: tlWidth }}
-                     onPointerDown={(e) => { if (e.target === e.currentTarget) setSel(null) }}>
+                     onPointerDown={laneDown}>
                   {lane.items.map((it) => {
                     const o = it.raw
                     let media = null
@@ -586,13 +636,17 @@ export default function Timeline({ s }) {
                     return (
                       <div key={it.id}
                            className={`tl-block ${lane.key} ${sel?.type === lane.key && sel.id === it.id ? 'sel' : ''}`}
-                           style={{ left: Math.round(it.t0 * pps), height: Math.max(18, h - 4), width: Math.max(20, Math.round((it.t1 - it.t0) * pps)) }}
+                           style={{ left: Math.round(it.t0 * pps),
+                                    top: 2 + (it.row || 0) * (rowH + 2),
+                                    height: Math.max(18, rowH - 4),
+                                    width: Math.max(20, Math.round((it.t1 - it.t0) * pps)) }}
                            title={lane.key === 'cap'
                              ? `${it.label}\ndrag to move · edges to stretch · alt disables the magnet`
                              : it.label}
                            onPointerDown={(e) => {
                              e.stopPropagation()
                              selectItem(lane.key, it.id)
+                             seekFromEvent(e)   // REN-173
                              // captions move on the timeline (REN-157); the other
                              // lanes keep their inspector-only behaviour
                              if (lane.key === 'cap' && !locked) capDrag(e, it, null)

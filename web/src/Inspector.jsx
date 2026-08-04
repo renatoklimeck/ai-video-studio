@@ -85,7 +85,7 @@ export function spreadRt(c, pp, force = false) {
 // on the sliders leaves a stale "✓ processed" preview on screen.
 const RT_SLIDERS = [
   ['smooth', 'Smooth skin'], ['even', 'Even tone'], ['blem', 'Clear blemishes'],
-  ['dewrinkle', 'Soften lines'], ['shine', 'De-shine'], ['plump', 'Plump'],
+  ['dewrinkle', 'Dewrinkle'], ['shine', 'De-shine'], ['plump', 'Plump'],
   ['eyes', 'Brighten eyes'], ['circles', 'Dark circles'],
 ]
 
@@ -411,21 +411,24 @@ export default function Inspector({ s }) {
                     <div className="foot-note">Only this clip. Changes made with “All clips”
                       elsewhere will not overwrite it.</div>
                   )}
+                  {/* The preview is automatic (REN-175). This button used to be
+                      the only way to see the real thing, which is why the whole
+                      feature felt like it needed permission to work; now it only
+                      renders the clip so retouch shows during PLAYBACK too. */}
                   {rtJob === item.id ? (
                     <div className="job-progress">
-                      <div className="label">processing retouch preview… {rtJobPct}%</div>
+                      <div className="label">rendering this clip… {rtJobPct}%</div>
                       <div className="progress-bar"><div style={{ width: `${rtJobPct}%` }} /></div>
                     </div>
                   ) : (
-                    <button className="btn-violet" style={{ height: 32 }} disabled={!faceInClip}
+                    <button className="btn-ghost" style={{ height: 30 }} disabled={!faceInClip}
+                            title="Renders the whole clip so the retouch also shows while the video plays. The paused preview is already live."
                             onClick={() => processRt(item.id)}>
-                      {rtFresh ? '✓ Preview processed — re-process' : rt.processed ? 'Re-process retouch preview' : 'Process retouch preview'}
+                      {rtFresh ? '✓ Rendered for playback' : 'Render this clip for playback'}
                     </button>
                   )}
-                  {rt.processed && rt.stale && (
-                    <div className="warn-note">⚠ <span>Clip or sliders changed — re-process to refresh the accurate preview.</span></div>
-                  )}
-                  <div className="foot-note">Sliders give a live face-only approximation; “Process” renders the real pipeline at preview res. Hold “compare” on the preview to check against the original. Export applies at full resolution.</div>
+                  <div className="foot-note">The preview updates as you drag — nothing to press.
+                    Hold “compare” on the preview to see the original. Export applies at full resolution.</div>
                 </>
               )}
             </div>

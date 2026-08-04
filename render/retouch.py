@@ -9,11 +9,16 @@ accepted and documented in the QA issue.
 Slider -> operation mapping (all strengths scaled by the master m below):
   intensity : master scale m = 0.4 + 0.6*(intensity/100)  (mirrors the CSS
               preview formula's (0.4+0.6k) factor)
-  smooth    : frequency separation — bilateral-filtered low band replaces the
-              skin low band while the high band (pores, texture) is kept at
-              >=70%, so skin evens out without going plastic
+  smooth    : frequency separation, then the edge-preserving filter runs on the
+              LOW band only — blotches merge, pores are added back untouched
+              (>=88%). The direction matters: the old chain did it the other way
+              round and measured 74% texture with 95% of the blotchiness still
+              there, which is the recipe for plastic skin (REN-170)
   even      : LAB a/b low-frequency variation pulled toward the skin mean
-              (evens redness/blotches without changing luminance = no whitening)
+              (evens redness/blotches without changing luminance = no
+              whitening). Fades out where the light is extreme — a specular
+              highlight has no colour of its own and painting skin chroma onto
+              it prints an orange patch
   blem      : median plate built on a face normalised to 300px (so the kernel
               means the same at preview and export res), blended in only where
               a pixel is a dark OR red outlier vs its neighbourhood
@@ -38,6 +43,11 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+
+# A dark line this deep (levels of 255) is structure, not a crease — a beard
+# edge, a nostril, the lash line. The dewrinkle lift fades to nothing by here,
+# which is what keeps the face from going waxy at the top of the slider.
+DEEP_DB = 26.0
 
 DETECT_EVERY = 6
 DETECT_W = 480.0
@@ -99,6 +109,19 @@ class Retouch:
         skin = cv2.inRange(ycrcb, (0, 133, 77), (255, 178, 130))
         skin = cv2.morphologyEx(skin, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
         mask = cv2.bitwise_and(mask, skin)
+
+        # The generic skin range is a colour range, and a beige wall sits inside
+        # it. That let the ellipse's corner catch a patch of background, where
+        # "even tone" then pulled the wall toward his skin colour and left a red
+        # smudge next to his eyebrow (REN-170). Judge against THIS face instead:
+        # anything far from the median colour of what is already masked is not
+        # his skin, whatever the generic range says.
+        sel = mask > 0
+        if sel.sum() > 500:
+            med = np.median(ycrcb[sel].reshape(-1, 3), axis=0)
+            d = np.abs(ycrcb.astype(np.float32) - med)
+            near = ((d[:, :, 1] < 12) & (d[:, :, 2] < 12)).astype(np.uint8) * 255
+            mask = cv2.bitwise_and(mask, near)
 
         er = max(4, int(fw * 0.14))
         eye_m = np.zeros((h, w), np.float32)
@@ -166,42 +189,67 @@ class Retouch:
         sigma = max(2.0, fw / 90.0)
 
         if s["smooth"] > 0.01:
-            low = cv2.GaussianBlur(src, (0, 0), sigma * 1.6)
-            high = src - low
-            # The frequency separation used to cancel itself out. A bilateral with
-            # a fixed ~9px radius, followed by a gaussian of sigma*1.6 — 9.87px on
-            # a 555px face — is a blur WIDER than the filter it is meant to
-            # preserve, so it erased the bilateral's work: measured, the surviving
-            # low-band correction was 0.113/255. All "smooth" really did was take
-            # 30% off the high band, and the whole effect at maximum was 2% of the
-            # face. He reported the feature as doing nothing, and he was nearly
-            # right.
+            # REBUILT (REN-170). The old chain blurred the wrong band. Measured
+            # on his own face at maximum: the texture inside the skin fell to
+            # 74% of the original while the blotchiness stayed at 95% — it took
+            # the pores and left the uneven patches, which is the exact recipe
+            # for "embasado e ruim". What reads as good skin is the opposite:
+            # blotches merge, pores stay.
             #
-            # Fix: run the bilateral on a face-NORMALISED copy, so its radius means
-            # the same thing whatever the resolution, and let it take more texture.
-            # Measured on a real frame: 1.41 → 4.13 MAD inside the face box, for
-            # 62ms/frame instead of 40ms. (Doing it at full res with a proportional
-            # sigmaSpace gives no more effect and costs 1.2s/frame.)
-            small_w = 200
-            scale = small_w / max(1.0, fw)
-            if scale < 1.0:
-                tiny = cv2.resize(roi, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-                tiny = cv2.bilateralFilter(tiny, 9, 30 + 50 * s["smooth"], 7)
-                base = cv2.resize(tiny, (roi.shape[1], roi.shape[0]),
-                                  interpolation=cv2.INTER_LINEAR).astype(np.float32)
-            else:
-                base = cv2.bilateralFilter(roi, 9, 30 + 50 * s["smooth"], 7).astype(np.float32)
-            base_low = cv2.GaussianBlur(base, (0, 0), sigma * 1.6)
-            keep = 1.0 - 0.6 * s["smooth"]  # texture stays >= 40% at the maximum
-            sm = base_low + high * keep
+            # So the separation happens FIRST, and the edge-preserving filter is
+            # applied to the LOW band only. The high band — pores, beard,
+            # lashes — is added back essentially untouched.
+            # The whole low band is computed SMALL. It is smooth by definition,
+            # so a face normalised to 256px carries all of it, and that turns a
+            # full-resolution blur plus three full-resolution bilateral passes
+            # (309 ms/frame, too slow to feel live) into the same work on a
+            # thumbnail. Only the subtraction and the recombination happen at
+            # full resolution, where the texture lives.
+            NW = 128.0
+            sc = min(1.0, NW / max(1.0, fw))
+            sig_sep = max(1.5, fw / 55.0)     # below this = blotch, above = pore
+            u8 = np.clip(src, 0, 255).astype(np.uint8)
+            small = (cv2.resize(u8, (0, 0), fx=sc, fy=sc, interpolation=cv2.INTER_AREA)
+                     if sc < 1.0 else u8)
+            small = cv2.GaussianBlur(small, (0, 0), max(0.6, sig_sep * sc))
+            up = lambda im: (cv2.resize(im, (roi.shape[1], roi.shape[0]),  # noqa: E731
+                                        interpolation=cv2.INTER_LINEAR).astype(np.float32)
+                             if sc < 1.0 else im.astype(np.float32))
+            low = up(small)
+            high = src - low
+            # three gentle passes flatten far more than one strong one, and keep
+            # the real shading (nose, jaw) that one strong pass would iron out
+            # d is pinned rather than derived from sigmaSpace: letting OpenCV
+            # size the kernel gave a ~29px radius and 294 ms/frame, and three
+            # cheap passes reach further than one expensive one anyway (the
+            # radii add in quadrature).
+            sc_col = 18 + 80 * s["smooth"]
+            for _ in range(3):
+                small = cv2.bilateralFilter(small, 11, sc_col, 13)
+            flat = up(small)
+            keep = 1.0 - 0.12 * s["smooth"]   # texture never drops below 88%
+            sm = flat + high * keep
             out = out * (1 - s["smooth"]) + sm * s["smooth"]
 
         if s["even"] > 0.01:
             lab = cv2.cvtColor(np.clip(out, 0, 255).astype(np.uint8), cv2.COLOR_BGR2LAB).astype(np.float32)
+            # Hold off where the light is extreme. A specular highlight has
+            # almost no colour of its own, so pulling it toward the skin's
+            # average chroma paints saturated skin colour onto something that is
+            # still bright — which is exactly the orange patch that appeared on
+            # his forehead at maximum. Same for deep shadow. The correction
+            # fades out as the luminance leaves the range the face actually
+            # lives in (REN-170).
+            Lm = float(np.median(lab[:, :, 0][mask > 0.5])) if (mask > 0.5).any() else 128.0
+            trust = np.clip(1.0 - np.abs(lab[:, :, 0] - Lm) / 45.0, 0, 1) * mask
             for ch in (1, 2):
                 lowc = cv2.GaussianBlur(lab[:, :, ch], (0, 0), sigma * 3)
                 mean = (lowc * mask).sum() / max(1.0, mask.sum())
-                lab[:, :, ch] += (mean - lowc) * (0.6 * s["even"]) * mask
+                # 0.9 and never more: this pulls each patch TOWARD the skin's
+                # mean, so a gain of 1 lands exactly on it and anything above
+                # overshoots — the blotch comes back inverted. At 1.15 that
+                # printed an orange patch across his forehead at maximum.
+                lab[:, :, ch] += (mean - lowc) * (0.9 * s["even"]) * trust
             out = cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR).astype(np.float32)
 
         if s["blem"] > 0.01:
@@ -239,14 +287,21 @@ class Retouch:
         if s["dewrinkle"] > 0.01:
             # Wrinkles are dark LINES at a scale between pores and shading: a
             # forehead line is far wider than a pore and far narrower than the
-            # shadow under a brow. Isolate exactly that band (difference of two
-            # gaussians), keep only its dark side — a line, never a highlight —
-            # and lift it back toward the skin around it. Pores live below the
-            # small sigma and are untouched, so the face does not go plastic.
-            sig_a = max(1.2, fw / 120.0)
-            sig_b = max(3.0, fw / 28.0)
+            # shadow under a brow. Isolate that band (difference of two
+            # gaussians) and keep only its dark side — a line, never a highlight.
+            #
+            # DEPTH IS THE WHOLE TRICK (REN-170). Lifting every dark thing in
+            # that band is what made the face go waxy: a beard edge and a
+            # nostril live in the same band as a crease, and flattening them
+            # flattens the face. A crease is a few levels deep; the structures
+            # that must survive are tens. So the lift fades out with depth and
+            # only ever touches the shallow end.
+            sig_a = max(1.0, fw / 150.0)
+            sig_b = max(3.0, fw / 45.0)
             band = cv2.GaussianBlur(out, (0, 0), sig_a) - cv2.GaussianBlur(out, (0, 0), sig_b)
-            out = out - np.minimum(band, 0) * (0.8 * s["dewrinkle"])
+            dark = np.minimum(band, 0)
+            shallow = np.clip((DEEP_DB - np.abs(dark)) / DEEP_DB, 0, 1)
+            out = out - dark * shallow * (1.5 * s["dewrinkle"])
 
         if s["shine"] > 0.01 and (mask > 0.5).any():
             hsv = cv2.cvtColor(np.clip(out, 0, 255).astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)

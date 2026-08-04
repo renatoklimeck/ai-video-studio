@@ -736,7 +736,14 @@ export default function Player({ s, onImportVideo }) {
       setGuides(hit)
       mutate((pp) => {
         const it = pp[listName].find((q) => q.id === item.id)
-        if (it) { it.x = +nx.toFixed(1); it.y = +ny.toFixed(1) }
+        if (!it) return
+        it.x = +nx.toFixed(1); it.y = +ny.toFixed(1)
+        // "Apply to all captions" has to hold for THIS gesture too (REN-171).
+        // It was wired into the Inspector's edit(), which every field on the
+        // right-hand panel goes through — but dragging the caption on the
+        // preview does not, and dragging is how he actually positions them. So
+        // the rule looked broken from where he was standing.
+        if (type === 'cap' && s.capApplyAll) s.spreadCapLook(pp, it)
       }, false)
     }
     const up = (ev) => {
@@ -780,6 +787,7 @@ export default function Player({ s, onImportVideo }) {
         } else {
           it.size = +Math.max(1, Math.min(20, size0 * ratio)).toFixed(2)
         }
+        if (type === 'cap' && s.capApplyAll) s.spreadCapLook(pp, it)   // REN-171
       }, false)
     }
     const up = (ev) => {
@@ -837,6 +845,7 @@ export default function Player({ s, onImportVideo }) {
         } else if (pos === 'l' || pos === 'r') {
           it.maxW = Math.round(Math.max(20, Math.min(96, Math.abs(ev.clientX - cx) * 2 / rect.width * 100)))
         }
+        if (type === 'cap' && s.capApplyAll) s.spreadCapLook(pp, it)   // REN-171
       }, false)
     }
     const up = (ev) => {
@@ -940,29 +949,37 @@ export default function Player({ s, onImportVideo }) {
   const [guides, setGuides] = useState([])     // alignment lines while dragging
   const [rtShot, setRtShot] = useState(null)   // { url, sig }
   const rtShotReq = useRef(null)
-  const rtWantSig = rt && !compare && !playing && !rtCacheFresh(clip) && pick(clip).kind === 'src'
+  const rtLastSig = useRef(null)
+  const rtWantSig = rt && !compare && !playing && pick(clip).kind === 'src'
     ? `${clip.id}|${rtSrcT.toFixed(2)}|${s.rtSig(rt)}`
     : null
   useEffect(() => {
     if (!rtWantSig) { setRtShot(null); return undefined }
     let dead = false
-    // debounce: a slider drag fires dozens of changes and only the last matters
-    const timer = setTimeout(async () => {
+    // While a slider is MOVING, ask for a smaller frame — it comes back sooner
+    // and he is watching the change, not the detail. The moment it settles,
+    // the same instant is fetched at full preview width (REN-175).
+    const sliderMoved = rtLastSig.current && rtLastSig.current.split('|')[2] !== rtWantSig.split('|')[2]
+    rtLastSig.current = rtWantSig
+    const shoot = async (w) => {
       rtShotReq.current?.abort()
       const ac = new AbortController()
       rtShotReq.current = ac
-      try {
-        const srcObj = p.sources?.[clip.src || 'main'] || {}
-        const blob = await api.rtFrame(s.currentId, srcObj.proxy || srcObj.path,
-                                       rtSrcT, rt, 720, ac.signal)
-        if (dead) return
-        setRtShot((old) => {
-          if (old?.url) URL.revokeObjectURL(old.url)
-          return { url: URL.createObjectURL(blob), sig: rtWantSig }
-        })
-      } catch { /* aborted, or the server said no — the CSS layer stays */ }
-    }, 90)
-    return () => { dead = true; clearTimeout(timer) }
+      const srcObj = p.sources?.[clip.src || 'main'] || {}
+      const blob = await api.rtFrame(s.currentId, srcObj.proxy || srcObj.path,
+                                     rtSrcT, rt, w, ac.signal)
+      if (dead) return
+      setRtShot((old) => {
+        if (old?.url) URL.revokeObjectURL(old.url)
+        return { url: URL.createObjectURL(blob), sig: rtWantSig }
+      })
+    }
+    const quick = setTimeout(() => {
+      shoot(sliderMoved ? 420 : 720).catch(() => {})
+    }, sliderMoved ? 40 : 90)
+    // the sharp one, once he stops moving
+    const sharp = setTimeout(() => { shoot(720).catch(() => {}) }, 320)
+    return () => { dead = true; clearTimeout(quick); clearTimeout(sharp) }
   }, [rtWantSig]) // eslint-disable-line react-hooks/exhaustive-deps
   // release the last blob when the card closes or the clip changes
   useEffect(() => () => { rtShotReq.current?.abort() }, [])
@@ -1109,8 +1126,8 @@ export default function Player({ s, onImportVideo }) {
             </div>
           ))}
           {rtShotOn
-            ? <div className="rt-chip">● retouch · real pipeline, this frame</div>
-            : rtLiveOn && faceBox && <div className="rt-chip">◐ retouch preview · live approximation</div>}
+            ? <div className="rt-chip">● retouch · live</div>
+            : rtLiveOn && faceBox && <div className="rt-chip">◐ retouch · approximate while playing</div>}
 
           {visOverlays.map((o) => {
             const a = itemAlpha(time, o.t0, o.t1 ?? dur, o.fadeIn, o.fadeOut)

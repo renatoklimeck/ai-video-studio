@@ -514,14 +514,19 @@ export function useStudio() {
     // Land in the next EMPTY stretch at or after the playhead (REN-156), never
     // on top of a caption that is already there. He adds captions with the
     // playhead wherever he last looked, which is usually inside one.
+    // Prefer the next empty stretch (REN-156), but NEVER refuse (REN-172).
+    // I read the first issue too literally: on a video captioned word by word
+    // there is no gap at all, so "+ Caption" turned into a button that only
+    // ever said no. Landing on top of another caption is something he can see
+    // and fix in a second — a button that does nothing is not.
     const want = 1.2
-    const slot = freeSlotAt(proj, +timeStore.get().toFixed(2), null, 0.6)
+    const at = +timeStore.get().toFixed(2)
+    const slot = freeSlotAt(proj, at, null, 0.6)
+    const t = slot ? slot[0] : at
+    const dur = slot ? Math.min(want, slot[1] - slot[0]) : want
     if (!slot) {
-      showToast('No empty space left between the captions — move or shorten one first')
-      return
+      showToast('No gap here, so it went in on top — drag it or shorten a neighbour to separate them')
     }
-    const t = slot[0]
-    const dur = Math.min(want, slot[1] - slot[0])
     // anchor the new caption to the source under that instant (REN-115)
     const [ci, srcT] = outToSource(proj, t)
     const src = ci != null ? (proj.clips[ci].src || 'main') : 'main'
