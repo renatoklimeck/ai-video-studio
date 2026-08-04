@@ -27,6 +27,9 @@ export default function Editor({ s }) {
 
   if (!p) return null
 
+  // the button is a toggle, so it has to know whether its own keyframes are on
+  const autoZoomOn = (p.clips || []).some((c) => (c.kfs || []).some((k) => k.auto))
+
   const isFileDrag = (e) => Array.from(e.dataTransfer?.types || []).includes('Files')
   // routes a drop by the region under the cursor + returns rects for affordances
   const analyzeDrag = (e) => {
@@ -109,6 +112,13 @@ export default function Editor({ s }) {
               <button className="btn-add" onClick={pickFile(audFileRef)}>+ Music</button>
               <button className="btn-add" title="Transcribe the voice into word-synced captions (re-run after cuts to refresh them)"
                       onClick={s.openTranscribe}>{s.project?.captions?.length ? 'Retranscribe' : 'Transcribe'}</button>
+              {/* REN-159 — alternating punch-ins, centred on the face; press
+                  again to take them off */}
+              <button className={`btn-add ${autoZoomOn ? 'teal' : ''}`}
+                      title={autoZoomOn
+                        ? 'Remove the automatic zoom (your own keyframes stay)'
+                        : 'Give the cut some rhythm: a small punch-in on alternate takes, centred on your face'}
+                      onClick={s.autoZoom}>{autoZoomOn ? '✓ Auto zoom' : '⤢ Auto zoom'}</button>
             </div>
           </>
         )}

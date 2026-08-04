@@ -794,13 +794,59 @@ input[type="range"] { accent-color: var(--accent); width: 100%; margin: 0; }
   font-size: 8.5px; color: var(--accent-light); background: rgba(138,147,255,0.15);
   border: 1px solid rgba(138,147,255,0.35); padding: 1px 5px; border-radius: 4px;
 }
+/* CapCut trim handle (REN-124): quiet until the pointer is near the edge, then
+   a white rounded bracket hugging it. Faint by default so a 40-clip timeline
+   does not read as a row of bright bars. */
 .trim-handle {
-  position: absolute; top: 0; width: 8px; height: 100%; cursor: ew-resize;
+  position: absolute; top: 0; width: 10px; height: 100%; cursor: ew-resize;
   background: var(--border-default); touch-action: none;
+  transition: background .12s ease, box-shadow .12s ease;
 }
 .tl-clip.sel .trim-handle { background: rgba(138,147,255,0.55); }
 .trim-handle.l { left: 0; border-radius: 7px 0 0 7px; }
 .trim-handle.r { right: 0; border-radius: 0 7px 7px 0; }
+.tl-clip:hover .trim-handle, .trim-handle:hover, .trim-handle.on {
+  background: rgba(255,255,255,0.92);
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.35);
+}
+/* the two grip lines CapCut draws inside the bracket */
+.trim-handle::after {
+  content: ''; position: absolute; left: 50%; top: 50%; width: 2px; height: 40%;
+  transform: translate(-50%, -50%); border-radius: 2px;
+  background: rgba(20,20,26,0); transition: background .12s ease;
+}
+.tl-clip:hover .trim-handle::after, .trim-handle:hover::after, .trim-handle.on::after {
+  background: rgba(20,20,26,0.55);
+}
+/* touch: a finger needs more than 10px */
+@media (pointer: coarse) { .trim-handle { width: 18px; } }
+
+/* audio fade dot + ramp (REN-125) — CapCut's white handle at the top corner,
+   quiet until the block is hovered, and the ramp it draws over the waveform */
+.fade-dot {
+  position: absolute; top: 2px; width: 9px; height: 9px; border-radius: 50%;
+  background: rgba(255,255,255,0.95); box-shadow: 0 0 0 1px rgba(0,0,0,0.4);
+  cursor: ew-resize; touch-action: none; z-index: 6;
+  opacity: 0; transition: opacity .12s ease;
+}
+.tl-clip:hover .fade-dot, .tl-block:hover .fade-dot, .fade-dot:hover { opacity: 1; }
+.fade-dot.l { margin-left: -4px; }
+.fade-dot.r { margin-right: -4px; }
+.fade-ramp {
+  position: absolute; top: 0; bottom: 0; z-index: 5; pointer-events: none;
+  background: linear-gradient(to right, rgba(10,10,14,0.72), rgba(10,10,14,0));
+}
+.fade-ramp.l { left: 0; }
+.fade-ramp.r { right: 0; transform: scaleX(-1); }
+@media (pointer: coarse) { .fade-dot { width: 14px; height: 14px; opacity: 1; } }
+
+/* live readout while trimming or fading */
+.drag-readout {
+  position: absolute; z-index: 30; transform: translate(-50%, -140%);
+  font-family: var(--font-mono); font-size: 10.5px; white-space: nowrap;
+  color: #0e1016; background: rgba(255,255,255,0.94); padding: 2px 6px;
+  border-radius: 5px; pointer-events: none; box-shadow: 0 3px 10px rgba(0,0,0,.45);
+}
 .tl-lane { height: 26px; position: relative; margin-top: 6px; }
 .tl-block {
   position: absolute; top: 2px; height: 22px; border-radius: 6px; cursor: pointer;
@@ -1195,6 +1241,18 @@ input[type="range"] { accent-color: var(--accent); width: 100%; margin: 0; }
 .audioout-row:hover { background: var(--bg-hover); }
 .audioout-row.sel { background: var(--bg-hover); color: var(--accent, #a78bfa); }
 .audioout-note { font-size: 11px; color: var(--text-muted); padding: 6px 8px; line-height: 1.4; }
+
+/* alignment guides while dragging in the preview (REN-154) */
+.align-guide { position: absolute; z-index: 40; pointer-events: none; }
+.align-guide.x { top: 0; bottom: 0; width: 0; border-left: 1px dashed rgba(95,217,201,.95); }
+.align-guide.y { left: 0; right: 0; height: 0; border-top: 1px dashed rgba(95,217,201,.95); }
+.align-guide span {
+  position: absolute; font-family: var(--font-mono); font-size: 9px; letter-spacing: .3px;
+  color: #0e1016; background: rgba(95,217,201,.95); padding: 1px 4px; border-radius: 3px;
+  white-space: nowrap;
+}
+.align-guide.x span { top: 6px; left: 4px; }
+.align-guide.y span { left: 6px; top: 4px; }
 
 /* release name in the header (REN-168). Deliberately quiet: it is there to be
    read when something goes wrong, not to compete with the controls. */

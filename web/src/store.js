@@ -902,24 +902,113 @@ export function useStudio() {
   // saved to project.json — it would bloat every autosave). Powers the honest
   // "face detected" chip and the live face-masked preview mask.
   const faceTrackKeys = useRef(new Set())
+  // Tracks are also kept in a ref so a caller that has just awaited detectFace
+  // can read them (auto zoom, REN-159) — React state is a render behind.
+  const faceTracksRef = useRef({})
+  const keepTrack = useCallback((srcKey, track) => {
+    faceTracksRef.current = { ...faceTracksRef.current, [srcKey]: track }
+    setFaceTracks((m) => ({ ...m, [srcKey]: track }))
+  }, [])
   const detectFace = useCallback((srcKey) => {
-    if (!srcKey) return
+    if (!srcKey) return Promise.resolve(null)
     const src = projRef.current?.sources?.[srcKey]
     const path = src?.proxy || src?.path // proxy = fast keyframe seeks
-    if (!path) return
-    if (faceTracks[srcKey] || faceTrackKeys.current.has(srcKey)) return
+    if (!path) return Promise.resolve(null)
+    if (faceTracksRef.current[srcKey]) return Promise.resolve(faceTracksRef.current[srcKey])
+    if (faceTrackKeys.current.has(srcKey)) return Promise.resolve(null)
     faceTrackKeys.current.add(srcKey)
     const pid = pidRef.current
-    api.facedetect(pid, path).then((r) => {
-      if (r.track) { setFaceTracks((m) => ({ ...m, [srcKey]: r.track })); return }
+    return api.facedetect(pid, path).then((r) => {
+      if (r.track) { keepTrack(srcKey, r.track); return r.track }
       return pollJob(r.job).then((st) => {
-        if (st.status !== 'done' || pidRef.current !== pid) return
-        return api.facetrack(pid, r.path).then((track) =>
-          setFaceTracks((m) => ({ ...m, [srcKey]: track })))
+        if (st.status !== 'done' || pidRef.current !== pid) return null
+        return api.facetrack(pid, r.path).then((track) => { keepTrack(srcKey, track); return track })
       })
-    }).catch(() => faceTrackKeys.current.delete(srcKey))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [faceTracks])
+    }).catch(() => { faceTrackKeys.current.delete(srcKey); return null })
+  }, [keepTrack])
+
+  // ── one button that gives the cut its rhythm (REN-159) ────────────────────
+  //
+  // What actually works in vertical social video, and why these numbers:
+  //
+  //  * ALTERNATE, never accumulate. Take 1 sits wide, take 2 comes in a little,
+  //    take 3 goes back out. Growing take after take ends up cropped into the
+  //    speaker's nostrils by take 6 — the mistake that makes an auto-zoom look
+  //    automatic. The pattern below cycles 1.00 / 1.07 / 1.00 / 1.05, so the
+  //    change is always relative to a wide neighbour and never compounds.
+  //  * SMALL. Between 5% and 8% reads as a change of energy; past ~15% on a
+  //    talking head it reads as a mistake, and on a 720p proxy it also reads as
+  //    softness, because a punch-in is a crop.
+  //  * HOLD, don't drift. Each take gets ONE scale for its whole length (two
+  //    identical keyframes), not a slow push. A continuous move on every take
+  //    is seasick; the cut itself is what carries the rhythm.
+  //  * SKIP SHORT TAKES. Under ~1.2s there is no time to register a change,
+  //    only a jolt.
+  //  * FOLLOW THE FACE. The centre comes from the detected face, not the middle
+  //    of the frame, or a punch-in on someone standing off-centre crops them
+  //    out. Clamped so the face stays inside Instagram's safe area.
+  //
+  // Marked with `auto: true` so a second press removes exactly what it added
+  // and leaves hand-made keyframes alone.
+  const ZOOM_CYCLE = [1.0, 1.07, 1.0, 1.05]
+  const autoZoom = useCallback(async () => {
+    const p0 = projRef.current
+    if (!p0?.clips?.length) return
+    if (typeLocked(p0, 'clip')) { showToast('Video track is locked'); return }
+
+    const hasAuto = p0.clips.some((c) => (c.kfs || []).some((k) => k.auto))
+    if (hasAuto) {                                  // second press = take it off
+      mutate((p) => {
+        for (const c of p.clips) {
+          if ((c.kfs || []).some((k) => k.auto)) c.kfs = (c.kfs || []).filter((k) => !k.auto)
+        }
+      })
+      showToast('Auto zoom removed — your own keyframes are untouched')
+      return
+    }
+
+    // face centres, per source, so the punch-in lands on him
+    const srcs = [...new Set(p0.clips.map((c) => c.src || 'main'))]
+    for (const k of srcs) { try { await detectFace(k) } catch { /* no track, use centre */ } }
+    const tracks = faceTracksRef.current
+
+    let skipped = 0, applied = 0
+    mutate((p) => {
+      let n = 0
+      for (const c of p.clips) {
+        const manual = (c.kfs || []).filter((k) => !k.auto)
+        if (manual.length) { skipped++; continue }   // never fight his own zoom
+        const d = c.out - c.in
+        if (d < 1.2) { skipped++; continue }
+        const scale = ZOOM_CYCLE[n % ZOOM_CYCLE.length]
+        n++
+        if (scale === 1) { c.kfs = manual; continue }  // the wide beats stay wide
+        // where he is, averaged over this clip (facedetect writes x/y as the
+        // face CENTRE, 0..1 of the frame)
+        const ss = (tracks[c.src || 'main']?.samples || [])
+          .filter((x) => x.t >= c.in && x.t <= c.out && x.x != null)
+        let cx = 50, cy = 45
+        if (ss.length) {
+          cx = 100 * ss.reduce((a, x) => a + x.x, 0) / ss.length
+          cy = 100 * ss.reduce((a, x) => a + x.y, 0) / ss.length
+        }
+        // A punch-in of `scale` crops to 1/scale of the frame, so a centre this
+        // far from the middle is as far as it can go before the crop runs off
+        // the edge. Clamped again to the safe area so his face never lands
+        // where Instagram puts its own buttons.
+        const room = 50 * (1 - 1 / scale)
+        cx = Math.max(50 - room, Math.min(50 + room, cx))
+        cy = Math.max(Math.max(50 - room, 20), Math.min(Math.min(50 + room, 78), cy))
+        c.kfs = [...manual,
+                 { t: 0, scale, cx: +cx.toFixed(1), cy: +cy.toFixed(1), auto: true },
+                 { t: +d.toFixed(2), scale, cx: +cx.toFixed(1), cy: +cy.toFixed(1), auto: true }]
+        applied++
+      }
+    })
+    showToast(applied
+      ? `Zoom on ${applied} take${applied > 1 ? 's' : ''}${skipped ? `, ${skipped} left alone` : ''} — press again to remove`
+      : 'Nothing to zoom — the takes are too short, or they already have keyframes')
+  }, [mutate, showToast, detectFace])
 
   // Accurate retouch preview: render this clip through the real pipeline at
   // proxy res (mirrors processBg). Stores rt._cache + processed/stale on the clip.
@@ -1457,7 +1546,7 @@ export function useStudio() {
     menuOpen, setMenuOpen, compare, setCompare, inlineEdit, setInlineEdit,
     exp, transc, bgJob, bgJobPct, bgJobAll, processBgAll, stopBgAll,
     rtJob, rtJobPct, faceTracks, detectFace, processRt,
-    capApplyAll, setCapApplyAll, spreadCapLook, splitCaption, moveCaption,
+    capApplyAll, setCapApplyAll, spreadCapLook, splitCaption, moveCaption, autoZoom,
     toast, busyMedia, showToast, dropMedia, pasteImage, classifyFile, appVersion,
     leftTab, setLeftTab, transcripts, transcribing, loadTranscripts, transcribeSources,
     transcriptDelete, transcriptRestore, transcriptSplitSource,

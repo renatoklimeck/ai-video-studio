@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { fileUrl } from './api'
 import { capSpan, clipOutStart, fmtTime, materializeCap, outDuration, outToSource, trackFlag, typeLocked } from './time'
-import { useTimeValue } from './timeStore'
+import { timeStore, useTimeValue } from './timeStore'
 
 // track lanes (REN-112): which controls each lane exposes + resize limits
 const LANES = [
@@ -182,6 +182,7 @@ export default function Timeline({ s }) {
 
   // per-device track heights (localStorage, keyed by project) — a view
   // preference, NOT content, so it never enters undo history
+  const [readout, setReadout] = useState(null)  // live figure while trimming (REN-124)
   const [heights, setHeights] = useState(DEFAULT_H)
   useEffect(() => {
     try {
@@ -246,20 +247,44 @@ export default function Timeline({ s }) {
     const oin = clip.in, oout = clip.out
     const src = p.sources?.[clip.src || 'main']
     const srcDur = src?.duration ?? 1e9
+    // magnets: the playhead and every cut on the timeline (REN-124)
+    const idx = (p.clips || []).findIndex((x) => x.id === clip.id)
+    const startAt = (p.clips || []).slice(0, idx).reduce((a, c) => a + (c.out - c.in), 0)
+    const snaps = [timeStore.get()]
+    let acc = 0
+    for (const c of p.clips || []) { snaps.push(acc); acc += c.out - c.in }
+    snaps.push(acc)
+    const MIN_CLIP = 0.1
     let moved = false
     const move = (ev) => {
       moved = true
-      const dt = (ev.clientX - sx) / pps
+      let dt = (ev.clientX - sx) / pps
+      if (!ev.altKey) {
+        // where this edge would land on the TIMELINE, so the magnet compares
+        // like with like
+        const edgeT = side === 'l' ? startAt + dt : startAt + (oout - oin) + dt
+        let best = null, bd = 7 / pps
+        for (const sp of snaps) { const d = Math.abs(sp - edgeT); if (d < bd) { bd = d; best = sp } }
+        if (best != null) dt += best - edgeT
+      }
+      let removed = 0, len = oout - oin
       mutate((pp) => {
         const c = pp.clips.find((x) => x.id === clip.id)
         if (!c) return
-        if (side === 'l') c.in = Math.max(0, Math.min(oout - 0.3, +(oin + dt).toFixed(2)))
-        else c.out = Math.max(oin + 0.3, Math.min(srcDur, +(oout + dt).toFixed(2)))
+        if (side === 'l') c.in = Math.max(0, Math.min(oout - MIN_CLIP, +(oin + dt).toFixed(2)))
+        else c.out = Math.max(oin + MIN_CLIP, Math.min(srcDur, +(oout + dt).toFixed(2)))
         if (c.bg?.processed) c.bg.stale = true
         if (c.rt?.processed) c.rt.stale = true
+        removed = side === 'l' ? c.in - oin : oout - c.out
+        len = c.out - c.in
       }, false)
+      setReadout({
+        x: ev.clientX, y: ev.clientY,
+        text: `${removed >= 0 ? '−' : '+'}${Math.abs(removed).toFixed(2)}s · ${len.toFixed(2)}s`,
+      })
     }
     const up = () => {
+      setReadout(null)
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
       window.removeEventListener('pointercancel', up)
@@ -267,6 +292,65 @@ export default function Timeline({ s }) {
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
     window.addEventListener('pointercancel', up)
+  }
+
+  // Audio fade by dragging a dot at the block's corner (REN-125).
+  //
+  // On a VIDEO clip the dot moves the AUDIO fade only — the picture does not dip
+  // — which is what CapCut does and why `aFadeIn/aFadeOut` had to be split off
+  // from the video `fadeIn/fadeOut`. Audio blocks have no picture, so there the
+  // one number does both jobs.
+  function fadeDrag(e, kind, item, side) {
+    const track = kind === 'aud' ? 'audio' : kind === 'ov' ? 'overlays' : 'video'
+    if (trackFlag(p, track, 'locked')) return
+    e.stopPropagation(); e.preventDefault()
+    beginGesture()
+    try { e.currentTarget.setPointerCapture(e.pointerId) } catch { /* synthetic */ }
+    const list = kind === 'aud' ? 'audios' : kind === 'ov' ? 'overlays' : 'clips'
+    const field = kind === 'aud'
+      ? (side === 'l' ? 'fadeIn' : 'fadeOut')
+      : (side === 'l' ? 'aFadeIn' : 'aFadeOut')
+    const blockDur = kind === 'clip' ? item.out - item.in : (item.t1 ?? dur) - item.t0
+    const sx = e.clientX
+    const start = +(item[field] ?? (kind === 'aud' ? 0 : item[side === 'l' ? 'fadeIn' : 'fadeOut']) ?? 0)
+    const move = (ev) => {
+      const dt = ((side === 'l' ? 1 : -1) * (ev.clientX - sx)) / pps
+      // never past half the block: two fades meeting in the middle is silence
+      const v = Math.max(0, Math.min(blockDur / 2, Math.round((start + dt) * 10) / 10))
+      mutate((pp) => {
+        const it = (pp[list] || []).find((x) => x.id === item.id)
+        if (it) it[field] = v
+      }, false)
+      setReadout({ x: ev.clientX, y: ev.clientY, text: `${v.toFixed(1)}s` })
+    }
+    const up = () => {
+      setReadout(null)
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up)
+  }
+
+  // the dot plus the ramp it draws over the waveform
+  const fadeDots = (kind, item, widthPx) => {
+    const fi = +(kind === 'aud' ? item.fadeIn : (item.aFadeIn ?? item.fadeIn) ?? 0) || 0
+    const fo = +(kind === 'aud' ? item.fadeOut : (item.aFadeOut ?? item.fadeOut) ?? 0) || 0
+    const w = Math.max(1, widthPx)
+    return (
+      <>
+        {fi > 0 && <div className="fade-ramp l" style={{ width: Math.min(w, fi * pps) }} />}
+        {fo > 0 && <div className="fade-ramp r" style={{ width: Math.min(w, fo * pps) }} />}
+        <div className="fade-dot l" title="Drag in to fade the audio up"
+             style={{ left: Math.min(w - 6, fi * pps) }}
+             onPointerDown={(e) => fadeDrag(e, kind, item, 'l')} />
+        <div className="fade-dot r" title="Drag in to fade the audio down"
+             style={{ right: Math.min(w - 6, fo * pps) }}
+             onPointerDown={(e) => fadeDrag(e, kind, item, 'r')} />
+      </>
+    )
   }
 
   const selectItem = (type, id) => {
@@ -360,6 +444,12 @@ export default function Timeline({ s }) {
 
   return (
     <div className="timeline" style={{ height: isMobile ? 264 : 290 }}>
+      {/* how much is coming off, while it comes off (REN-124) */}
+      {readout && (
+        <div className="drag-readout" style={{ position: 'fixed', left: readout.x, top: readout.y ?? 0 }}>
+          {readout.text}
+        </div>
+      )}
       <div className="tl-toolbar">
         <SplitButton p={p} splitClip={splitClip} />
         <div className="tl-counter">{(p.clips || []).length} clips · {fmtTime(dur)}</div>
@@ -436,6 +526,8 @@ export default function Timeline({ s }) {
                           <span className="vol-tag">{Math.round((c.vol ?? 1) * 100)}%</span>
                         </div>
                       )}
+                      {/* audio fade dots + ramps, over the waveform (REN-125) */}
+                      {!locked && fadeDots('clip', c, w)}
                     </div>
                     {rails[i] && <div className={`grp ${rails[i]}`} />}
                     {(label != null || c.bg || c.rt) && (
@@ -507,6 +599,9 @@ export default function Timeline({ s }) {
                            }}>
                         {media && <div className="bgimg" style={media} />}
                         <span className={media ? 'pill' : ''}>{it.label}</span>
+                        {/* audio fade dots on the blocks that carry sound (REN-125) */}
+                        {!locked && (lane.key === 'aud' || (lane.key === 'ov' && o?.kind === 'video'))
+                          && fadeDots(lane.key, o || it, Math.max(20, Math.round((it.t1 - it.t0) * pps)))}
                         {lane.key === 'cap' && !locked && (
                           <>
                             <div className="trim-handle l" onPointerDown={(e) => capDrag(e, it, 'l')} />

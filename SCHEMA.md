@@ -60,9 +60,22 @@ captions/texts/overlays/audios são segundos de **TIMELINE** (não da fonte).
                                  // tentativas repetidas da mesma fala se leem como um
                                  // conjunto. Qualquer outro texto vira rótulo simples,
                                  // sem trilho.
+  "fadeIn": 0, "fadeOut": 0,     // fade da IMAGEM para preto (s)
+  "aFadeIn": 0, "aFadeOut": 0,   // fade do ÁUDIO (s) — REN-125. Separado do de
+                                 // vídeo: a bolinha na waveform mexe só no som,
+                                 // como no CapCut. Ausente = usa o de vídeo
+                                 // (projetos anteriores à separação; ver
+                                 // scripts/migrate_afade.py). Vale para clips
+                                 // e overlays de vídeo. Em audios[] o
+                                 // fadeIn/fadeOut já era só de áudio.
   "kfs": [                       // keyframes de zoom; t relativo ao início do clipe
     { "t": 0, "scale": 1, "cx": 50, "cy": 50 },   // cx/cy em % 0–100 (50 = centro)
-    { "t": 5.2, "scale": 1.15, "cx": 50, "cy": 45 }
+    { "t": 5.2, "scale": 1.15, "cx": 50, "cy": 45 },
+    { "t": 0, "scale": 1.07, "cx": 48, "cy": 42, "auto": true }
+                                 // auto:true = posto pelo botão Auto zoom
+                                 // (REN-159). Um segundo clique remove SÓ estes;
+                                 // keyframe sem a marca é dele e nunca é tocado.
+                                 // O renderer ignora o campo.
   ],
   "bg": {                        // remoção de fundo (null = off)
     "color": "#0E3B34", "feather": 4,

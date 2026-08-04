@@ -10,6 +10,21 @@ const SYNC_EPS = 0.12
 // the fourth jumped four frames. Same for slow playhead dragging. The loose
 // value stays for playback, where it prevents seeking on ordinary drift.
 const PAUSE_EPS = 0.01
+
+// Alignment guides (REN-154). The frame centres, and the edges of the area
+// Instagram never covers with its own UI — the reason he moves captions at all.
+// The 4%/12%/82% figures are the safe area this app already works to.
+const SNAP_PCT = 1.6        // how close (in % of the frame) the magnet grabs
+const SNAP_X = [
+  { at: 50, label: 'centre' },
+  { at: 6, label: 'safe left' },
+  { at: 94, label: 'safe right' },
+]
+const SNAP_Y = [
+  { at: 50, label: 'middle' },
+  { at: 12, label: 'safe top' },
+  { at: 82, label: 'safe bottom' },
+]
 // How long before a cut the next clip starts rolling out of sight. It has to
 // comfortably clear the measured 188ms that play() takes to paint its first
 // frame on a paused element.
@@ -705,8 +720,20 @@ export default function Player({ s, onImportVideo }) {
       if (!rect || rect.width < 2 || rect.height < 2) return
       if (Math.abs(ev.clientX - sx) + Math.abs(ev.clientY - sy) > CLICK_SLOP) moved = true
       if (!moved) return
-      const nx = Math.max(2, Math.min(98, ox + ((ev.clientX - sx) / rect.width) * 100))
-      const ny = Math.max(2, Math.min(98, oy + ((ev.clientY - sy) / rect.height) * 100))
+      let nx = Math.max(2, Math.min(98, ox + ((ev.clientX - sx) / rect.width) * 100))
+      let ny = Math.max(2, Math.min(98, oy + ((ev.clientY - sy) / rect.height) * 100))
+      // CapCut-style guides + magnet (REN-154). Centres of the frame, and the
+      // Instagram safe area the app already draws — the two places a thing
+      // being dragged is meant to line up with. Alt suspends the magnet for
+      // fine positioning, as it does in every editor.
+      const hit = []
+      if (!ev.altKey) {
+        const snapX = SNAP_X.find((g) => Math.abs(nx - g.at) <= SNAP_PCT)
+        const snapY = SNAP_Y.find((g) => Math.abs(ny - g.at) <= SNAP_PCT)
+        if (snapX) { nx = snapX.at; hit.push({ axis: 'x', ...snapX }) }
+        if (snapY) { ny = snapY.at; hit.push({ axis: 'y', ...snapY }) }
+      }
+      setGuides(hit)
       mutate((pp) => {
         const it = pp[listName].find((q) => q.id === item.id)
         if (it) { it.x = +nx.toFixed(1); it.y = +ny.toFixed(1) }
@@ -719,6 +746,7 @@ export default function Player({ s, onImportVideo }) {
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
       window.removeEventListener('pointercancel', up)
+      setGuides([])                     // the guide goes as soon as he lets go
       // a plain click on an already-selected text enters inline editing
       if (!moved && !wasPinch && wasSelected && (type === 'cap' || type === 'text')) enterEdit(type, item)
     }
@@ -909,6 +937,7 @@ export default function Player({ s, onImportVideo }) {
   // Measured on this machine: seek+decode 35 ms (cached server-side after the
   // first request at an instant), face detection 7.8 ms, filter chain 132 ms at
   // his own setting and 246 ms with every slider at 100.
+  const [guides, setGuides] = useState([])     // alignment lines while dragging
   const [rtShot, setRtShot] = useState(null)   // { url, sig }
   const rtShotReq = useRef(null)
   const rtWantSig = rt && !compare && !playing && !rtCacheFresh(clip) && pick(clip).kind === 'src'
@@ -1071,6 +1100,14 @@ export default function Player({ s, onImportVideo }) {
             </div>
           )}
           {bgBadge && <div className="bg-chip">BG processed</div>}
+
+          {/* alignment guides — only while something is actually snapped */}
+          {guides.map((g) => (
+            <div key={`${g.axis}${g.at}`} className={`align-guide ${g.axis}`}
+                 style={g.axis === 'x' ? { left: `${g.at}%` } : { top: `${g.at}%` }}>
+              <span>{g.label}</span>
+            </div>
+          ))}
           {rtShotOn
             ? <div className="rt-chip">● retouch · real pipeline, this frame</div>
             : rtLiveOn && faceBox && <div className="rt-chip">◐ retouch preview · live approximation</div>}

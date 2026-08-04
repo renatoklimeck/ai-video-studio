@@ -212,11 +212,21 @@ export default function Inspector({ s }) {
                         onChange={(v) => editClipStaleLive((c) => { c.in = Math.max(0, Math.min(c.out - 0.3, v)) })} />
               <NumField label="End (source, s)" value={item.out} step={0.1} onFocus={beginGesture}
                         onChange={(v) => editClipStaleLive((c) => { c.out = Math.max(c.in + 0.3, v) })} />
-              <NumField label="Fade in (s)" value={item.fadeIn} step={0.1} onFocus={beginGesture}
+              {/* two different things, split in REN-125: one fades the PICTURE
+                  to black, the other eases the SOUND. They used to be one
+                  number, so easing the audio in also dipped the image. */}
+              <NumField label="Video fade in (s)" value={item.fadeIn} step={0.1} onFocus={beginGesture}
                         onChange={(v) => editLive((c) => { c.fadeIn = Math.max(0, v) })} />
-              <NumField label="Fade out (s)" value={item.fadeOut} step={0.1} onFocus={beginGesture}
+              <NumField label="Video fade out (s)" value={item.fadeOut} step={0.1} onFocus={beginGesture}
                         onChange={(v) => editLive((c) => { c.fadeOut = Math.max(0, v) })} />
+              <NumField label="Audio fade in (s)" value={item.aFadeIn ?? item.fadeIn ?? 0} step={0.1}
+                        onFocus={beginGesture}
+                        onChange={(v) => editLive((c) => { c.aFadeIn = Math.max(0, v) })} />
+              <NumField label="Audio fade out (s)" value={item.aFadeOut ?? item.fadeOut ?? 0} step={0.1}
+                        onFocus={beginGesture}
+                        onChange={(v) => editLive((c) => { c.aFadeOut = Math.max(0, v) })} />
             </div>
+            <div className="insp-hint">Drag the white dot on the clip’s waveform to set the audio fade.</div>
             <label className="slider-label">Clip volume · {Math.round((item.vol ?? 1) * 100)}%
               <input type="range" min="0" max="2" step="0.05" value={item.vol ?? 1}
                      onPointerDown={beginGesture}

@@ -169,10 +169,18 @@ def build_audio_filter(project, project_dir, out_dur, tmpdir):
         idx = input_for(resolve(project_dir, src.get("path")))
         d = c["out"] - c["in"]
         # AUDIO-only micro fade at every cut (>= 8ms) so there are no clicks/pops
-        # between clips; a real user fadeIn/fadeOut (video-to-black) wins if larger.
+        # between clips; a real audio fade wins if larger.
+        #
+        # `aFadeIn/aFadeOut` is the AUDIO fade (REN-125); `fadeIn/fadeOut` fades
+        # the picture to black. They used to be one number, so easing the sound
+        # in also dipped the image — not what the dot on the timeline means, and
+        # not what CapCut does. Old projects fall back to the video fade, which
+        # is exactly what they had before.
         declick = min(0.008, d / 2)
-        fin = min(max(c.get("fadeIn") or 0, declick), d)
-        fout = min(max(c.get("fadeOut") or 0, declick), d)
+        afi = c.get("aFadeIn", c.get("fadeIn")) or 0
+        afo = c.get("aFadeOut", c.get("fadeOut")) or 0
+        fin = min(max(afi, declick), d)
+        fout = min(max(afo, declick), d)
         fades = f",afade=t=in:st=0:d={fin:.3f},afade=t=out:st={max(0, d - fout):.3f}:d={fout:.3f}"
         volf = f",volume={float(c.get('vol', 1.0)):.4f}" if float(c.get("vol", 1.0)) != 1.0 else ""
         parts.append(f"[{idx}:a]atrim=start={c['in']:.4f}:end={c['out']:.4f},asetpts=PTS-STARTPTS{volf}{fades}[sa{i}];")
@@ -188,8 +196,12 @@ def build_audio_filter(project, project_dir, out_dur, tmpdir):
         for a in project.get("audios", [])]
     for o in project.get("overlays", []):
         if not tflag("overlays", "muted") and o.get("kind") == "video" and float(o.get("vol", 0)) > 0:
+            # same split as the clips (REN-125): the overlay's fadeIn/fadeOut is
+            # its picture, aFadeIn/aFadeOut its sound
             items.append({"path": o.get("path"), "t0": o.get("t0", 0), "t1": o.get("t1"),
-                          "vol": o["vol"], "fadeIn": o.get("fadeIn", 0), "fadeOut": o.get("fadeOut", 0)})
+                          "vol": o["vol"],
+                          "fadeIn": o.get("aFadeIn", o.get("fadeIn")) or 0,
+                          "fadeOut": o.get("aFadeOut", o.get("fadeOut")) or 0})
     for j, a in enumerate(items):
         p = resolve(project_dir, a["path"])
         if not p or not Path(p).is_file():
