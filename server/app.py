@@ -516,6 +516,118 @@ def visual_check(d: Path, table, picks, model_key):
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def choose_best(d: Path, table, script_lines, picks, alts, model_key):
+    """Among the takes that are all GOOD, pick the best delivery. Returns
+    {line number: [take ids]} for the lines it wants changed.
+
+    The split that makes this both fast and right: code decides what is USABLE —
+    complete against the approved script, not abandoned, audible, in frame — and
+    that is measurement, done in a second. Which of four correct reads lands best
+    is taste, and the model is better at taste than any threshold. So it is asked
+    exactly one question, about exactly the lines where there is a choice, and it
+    sees a frame from every candidate while it answers.
+
+    The deterministic pick is the FLOOR: anything the model returns that is not a
+    real candidate is ignored, and if the call fails the edit ships unchanged."""
+    if not alts:
+        return {}
+    by_id = {t["id"]: t for t in table["takes"]}
+    chosen = {p["line"]: p["takes"] for p in picks}
+    # every candidate, deduped, capped — a contact sheet nobody can read is worse
+    # than no contact sheet
+    cands = {}
+    for line, others in alts.items():
+        opts = [chosen[line]] + list(others)
+        cands[line] = opts[:4]
+    ids, order = [], []
+    for line in sorted(cands):
+        for grp in cands[line]:
+            head = grp[0]
+            if head in by_id and head not in ids:
+                ids.append(head)
+                order.append((line, head, grp))
+        if len(ids) >= 12:
+            break
+    if len(ids) < 2:
+        return {}
+
+    proj = read_project(d)
+    src = (proj.get("sources") or {}).get(table["src"]) or {}
+    media = next((c for c in (d / "media" / "proxy_main.mp4",
+                              d / "media" / "proxy_source.mp4") if c.exists()), None)
+    media = media or resolve_media(d, src.get("path"))
+    if not media:
+        return {}
+    tmpdir = Path(tempfile.mkdtemp(prefix="vpick_"))
+    try:
+        shots = []
+        for tid in ids:
+            t = by_id[tid]
+            at = t["in"] + (t["out"] - t["in"]) * 0.45
+            out = tmpdir / f"t{tid}.jpg"
+            subprocess.run(
+                [FFMPEG, "-y", "-loglevel", "error", "-ss", f"{at:.2f}", "-i", str(media),
+                 "-frames:v", "1", "-vf",
+                 f"scale=260:-2,drawtext=text='TAKE {tid}':fontsize=26:fontcolor=yellow:"
+                 "box=1:boxcolor=black@0.75:x=6:y=6", str(out)],
+                capture_output=True, timeout=60)
+            if out.exists():
+                shots.append(out)
+        sheet = tmpdir / "sheet.jpg"
+        if len(shots) >= 2:
+            cmd = [FFMPEG, "-y", "-loglevel", "error"]
+            for s in shots:
+                cmd += ["-i", str(s)]
+            cmd += ["-filter_complex", f"{''.join(f'[{i}]' for i in range(len(shots)))}"
+                    f"hstack=inputs={len(shots)}", str(sheet)]
+            subprocess.run(cmd, capture_output=True, timeout=120)
+
+        blocks = []
+        for line in sorted(cands):
+            txt = script_lines[line - 1] if 0 < line <= len(script_lines) else "?"
+            rows = []
+            for grp in cands[line]:
+                t = by_id.get(grp[0])
+                if not t:
+                    continue
+                rows.append(f"    take {grp[0]}: {t['out'] - t['in']:.1f}s, "
+                            f"{t.get('db_rel', 0):+.1f}dB vs session, "
+                            f"says \"{t['text'][:70]}\"")
+            if len(rows) > 1:
+                blocks.append(f'  line {line} — "{txt[:70]}"\n' + "\n".join(rows))
+        if not blocks:
+            return {}
+
+        q = (("Look at the image at " + str(sheet) + ", one frame per take labelled TAKE <n>.\n\n"
+              if sheet.exists() else "")
+             + "Each line below was recorded more than once, and EVERY option is already known "
+               "to be correct and complete — they are not in question. Choose the one that is "
+               "the best DELIVERY: natural energy, clean start, presenting to camera, no odd "
+               "expression or hand in shot.\n\n" + "\n\n".join(blocks) +
+             "\n\nPrefer a later take when they are equally good — that is the one he settled "
+             'on. Reply ONLY as JSON: {"pick": {"<line>": <take number>}}, and include a line '
+             "only if you would change nothing about that choice.")
+        r = run_agent(q, model_key, "low", 300, cwd=str(tmpdir))
+        m = re.search(r"\{.*\}", r.stdout or "", re.S)
+        if not m:
+            return {}
+        want = (json.loads(m.group(0)) or {}).get("pick") or {}
+        out = {}
+        for k, v in want.items():
+            try:
+                line, tid = int(k), int(v)
+            except (TypeError, ValueError):
+                continue
+            for grp in cands.get(line) or []:
+                if grp[0] == tid and grp != chosen.get(line):
+                    out[line] = grp     # only ever a candidate WE offered
+        return out
+    except Exception:  # noqa: BLE001 — taste is a bonus; never fail the edit for it
+        return {}
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 CUT_WORDS = ("edit", "cut", "take", "corte", "corta", "edite", "edição", "edicao",
              "editar", "monte", "montar", "primeira edi", "first edit", "assemble",
              "escolh", "choose", "pick", "trim", "silêncio", "silencio", "silence")
@@ -633,15 +745,11 @@ def run_take_pipeline(pid, d: Path, model_key, effort):
             # line with a single usable attempt, rejecting it buys nothing.
             swapped = 0
             if alts:
-                rejected = set(visual_check(d, table, {"picks": auto}, model_key) or [])
+                better = choose_best(d, table, script_lines, auto, alts, model_key)
                 for p in auto:
-                    if not (rejected & set(p["takes"])):
-                        continue
-                    for other in alts.get(p["line"]) or []:
-                        if not (rejected & set(other)):
-                            p["takes"] = other
-                            swapped += 1
-                            break
+                    if p["line"] in better:
+                        p["takes"] = better[p["line"]]
+                        swapped += 1
             res = assemble(d, {"src": src_key, "picks": auto}, trusted=trusted)
             if res.get("ok"):
                 try:
@@ -653,8 +761,8 @@ def run_take_pipeline(pid, d: Path, model_key, effort):
                         f"roteiro, e {res['captions']} grupos de legenda gerados do corte final."
                         + (f" Ouvi {len(trusted)} take(s) isolados para conferir uma flag que "
                            "estava errada." if trusted else "")
-                        + (f" Olhei os frames e troquei {swapped} take(s) por uma versão melhor "
-                           "enquadrada." if swapped else ""))
+                        + (f" Entre as leituras boas, olhei os frames e o modelo escolheu outra "
+                           f"em {swapped} linha(s)." if swapped else ""))
     except Exception:  # noqa: BLE001 — never let the shortcut break the real path
         pass
 
