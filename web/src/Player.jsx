@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { fileUrl } from './api'
+import { api, fileUrl } from './api'
 import { FONTS_CSS, capSpan, clipOutStart, itemAlpha, fmtTime, materializeCap, mkWords, mkWordsSrcCovered, outDuration, outToSource, trackFlag, typeLocked, zoomAt } from './time'
 import { timeStore, useTimeValue } from './timeStore'
 
@@ -883,6 +883,47 @@ export default function Player({ s, onImportVideo }) {
       ` at ${(faceBox.x * 100).toFixed(1)}% ${(faceBox.y * 100).toFixed(1)}%, #000 55%, transparent 100%)`
     return { WebkitMaskImage: grad, maskImage: grad }
   })() : null
+
+  // THE REAL PIPELINE, ON THE FRAME HE IS LOOKING AT (REN-161).
+  //
+  // "Process retouch preview" renders the whole clip, which is why it needed a
+  // button and a wait. While paused, nothing on screen needs more than this one
+  // frame — so it is fetched automatically whenever a slider moves. The CSS
+  // approximation above stays for playback, where a round trip per frame could
+  // never keep up.
+  //
+  // Measured on this machine: seek+decode 35 ms (cached server-side after the
+  // first request at an instant), face detection 7.8 ms, filter chain 132 ms at
+  // his own setting and 246 ms with every slider at 100.
+  const [rtShot, setRtShot] = useState(null)   // { url, sig }
+  const rtShotReq = useRef(null)
+  const rtWantSig = rt && !compare && !playing && !rtCacheFresh(clip) && pick(clip).kind === 'src'
+    ? `${clip.id}|${rtSrcT.toFixed(2)}|${s.rtSig(rt)}`
+    : null
+  useEffect(() => {
+    if (!rtWantSig) { setRtShot(null); return undefined }
+    let dead = false
+    // debounce: a slider drag fires dozens of changes and only the last matters
+    const timer = setTimeout(async () => {
+      rtShotReq.current?.abort()
+      const ac = new AbortController()
+      rtShotReq.current = ac
+      try {
+        const srcObj = p.sources?.[clip.src || 'main'] || {}
+        const blob = await api.rtFrame(s.currentId, srcObj.proxy || srcObj.path,
+                                       rtSrcT, rt, 720, ac.signal)
+        if (dead) return
+        setRtShot((old) => {
+          if (old?.url) URL.revokeObjectURL(old.url)
+          return { url: URL.createObjectURL(blob), sig: rtWantSig }
+        })
+      } catch { /* aborted, or the server said no — the CSS layer stays */ }
+    }, 90)
+    return () => { dead = true; clearTimeout(timer) }
+  }, [rtWantSig]) // eslint-disable-line react-hooks/exhaustive-deps
+  // release the last blob when the card closes or the clip changes
+  useEffect(() => () => { rtShotReq.current?.abort() }, [])
+  const rtShotOn = !!rtShot && rtShot.sig === rtWantSig
   const activeSrcObj = clip ? (p.sources?.[clip.src || 'main'] || null) : null
 
   const veil = clip ? 1 - clipFade(clip, time - clipStart) : 0
@@ -996,6 +1037,12 @@ export default function Player({ s, onImportVideo }) {
                                 zIndex: 2,
                                 opacity: faceBox ? 1 : 0 }} />
             )}
+            {/* the real pipeline on this frame — sits above the approximation */}
+            {rtShotOn && (
+              <img src={rtShot.url} alt="" draggable={false}
+                   style={{ position: 'absolute', inset: 0, width: '100%', height: '100%',
+                            objectFit: 'cover', zIndex: 3, pointerEvents: 'none' }} />
+            )}
           </div>
 
           {/* video track hidden → black frame, other elements still on top */}
@@ -1010,7 +1057,9 @@ export default function Player({ s, onImportVideo }) {
             </div>
           )}
           {bgBadge && <div className="bg-chip">BG processed</div>}
-          {rtLiveOn && faceBox && <div className="rt-chip">◐ retouch preview · live approximation</div>}
+          {rtShotOn
+            ? <div className="rt-chip">● retouch · real pipeline, this frame</div>
+            : rtLiveOn && faceBox && <div className="rt-chip">◐ retouch preview · live approximation</div>}
 
           {visOverlays.map((o) => {
             const a = itemAlpha(time, o.t0, o.t1 ?? dur, o.fadeIn, o.fadeOut)
