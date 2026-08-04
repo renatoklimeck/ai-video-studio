@@ -18,7 +18,11 @@ export default function Transcript({ s }) {
     setShowDeleted(on)
     try { sessionStorage.setItem('vs-show-deleted', on ? '1' : '0') } catch { /* private mode */ }
   }
-  const [sel, setSel] = useState(null) // { a, b } — flat kept-word index range (can span takes)
+  // Selection is a LIST of ranges over flat kept-word indices (REN-166). One
+  // range is the ordinary drag; ⌘-click adds another, so several separate bits
+  // of the video can be cut in a single action and undone in a single step.
+  // Ranges may span takes and sources — doDelete regroups them per source.
+  const [sel, setSel] = useState([])    // [{ a, b }]
   const [lang, setLang] = useState('auto')
   const [busy, setBusy] = useState(false)  // measuring cut boundaries (REN-164)
   const dragRef = useRef(null)          // flat index anchoring an in-progress drag
@@ -68,7 +72,29 @@ export default function Transcript({ s }) {
 
   // the transcript word selection and the timeline element selection both react
   // to Delete — keep them mutually exclusive so each key goes to the right one
-  useEffect(() => { if (s.sel) setSel(null) }, [s.sel])
+  useEffect(() => { if (s.sel) setSel([]) }, [s.sel])
+
+  // flat indices covered by the selection, in order
+  const selIdx = useMemo(() => {
+    const set = new Set()
+    for (const r of sel) {
+      for (let i = Math.min(r.a, r.b); i <= Math.max(r.a, r.b); i++) set.add(i)
+    }
+    return set
+  }, [sel])
+
+  // the run of words around `idx` that reads as one sentence. Bounded by
+  // sentence-ending punctuation and by the take, so a triple click on a
+  // transcript whisper punctuated poorly still selects something sane rather
+  // than the whole video.
+  const sentenceAt = (idx) => {
+    const ends = (e) => /[.!?…]$/.test((e.w.w || '').trim())
+    const clip = flatKept[idx]?.clipIndex
+    let a = idx, b = idx
+    while (a > 0 && flatKept[a - 1].clipIndex === clip && !ends(flatKept[a - 1])) a--
+    while (b < flatKept.length - 1 && flatKept[b + 1].clipIndex === clip && !ends(flatKept[b])) b++
+    return { a, b }
+  }
 
   // that source's kept words in SOURCE order, which is what a cut boundary is
   // measured in. flatKept is in TIMELINE order (REN-165), and after an AI edit
@@ -96,11 +122,11 @@ export default function Transcript({ s }) {
   // inaudible, so they say nothing.
   const spliced = (pt) => !!pt && !pt.measured && (pt.level ?? -99) >= -6
 
-  // Cut the selected range (may span takes/sources) in one undo entry
+  // Cut everything selected (any number of ranges, spanning takes and sources)
+  // in ONE undo entry
   const doDelete = async () => {
-    if (!sel || busy) return
-    const lo = Math.min(sel.a, sel.b), hi = Math.max(sel.a, sel.b)
-    const chosen = flatKept.slice(lo, hi + 1)
+    if (!selIdx.size || busy) return
+    const chosen = flatKept.filter((e) => selIdx.has(e.flatIdx))
     if (!chosen.length) return
 
     // One cut span per CONTIGUOUS RUN of the footage, per source.
@@ -160,7 +186,7 @@ export default function Transcript({ s }) {
     } finally { setBusy(false) }
 
     s.transcriptDelete(spans)
-    setSel(null)
+    setSel([])
     if (rough.length) {
       s.showToast(`Cut — but “${rough[0]}” run together in the audio${
         rough.length > 1 ? ` (+${rough.length - 1})` : ''}, so that join will sound spliced.`)
@@ -169,8 +195,8 @@ export default function Transcript({ s }) {
 
   // split the take at the end of the selection (isolate the range as a take)
   const doSplit = async () => {
-    if (!sel || busy) return
-    const at = flatKept[Math.max(sel.a, sel.b)]
+    if (!selIdx.size || busy) return
+    const at = flatKept[Math.max(...selIdx)]
     if (!at) return
     const order = keptOfSrc(at.src)
     const next = order[order.indexOf(at) + 1]
@@ -183,7 +209,7 @@ export default function Transcript({ s }) {
       if (pts[0]) { t = pts[0].t; measured = spliced(pts[0]) }
     } finally { setBusy(false) }
     s.transcriptSplitSource(at.src, t)
-    setSel(null)
+    setSel([])
     if (measured) s.showToast('Split — there is no pause there, so the two takes will sound joined.')
   }
 
@@ -194,12 +220,12 @@ export default function Transcript({ s }) {
       if ((e.metaKey || e.ctrlKey) && (e.key === 'a' || e.key === 'A')) {
         if (!flatKept.length) return
         e.preventDefault(); e.stopPropagation()
-        s.setSel(null); setSel({ a: 0, b: flatKept.length - 1 }); return
+        s.setSel(null); setSel([{ a: 0, b: flatKept.length - 1 }]); return
       }
-      if (!sel) return
+      if (!selIdx.size) return
       if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); e.stopPropagation(); doDelete() }
       else if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); doSplit() }
-      else if (e.key === 'Escape') { e.stopPropagation(); setSel(null) }
+      else if (e.key === 'Escape') { e.stopPropagation(); setSel([]) }
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
@@ -212,24 +238,44 @@ export default function Transcript({ s }) {
     return () => window.removeEventListener('pointerup', up)
   }, [])
 
+  // Text-editor gestures (REN-166): drag selects, shift extends, ⌘-click adds a
+  // separate piece, double-click takes the word, triple-click the sentence.
+  //
+  // The click count is counted here rather than read from `e.detail`: measured
+  // in this app's own browser, a real `pointerdown` reports detail 0 (it is
+  // mousedown that carries the count), so a triple click would never fire.
+  const clickRef = useRef({ idx: -1, n: 0, t: 0 })
   const wordDown = (e, entry) => {
-    if (!entry.kept) { s.transcriptRestore(entry.src, entry.w); setSel(null); return }
+    if (!entry.kept) { s.transcriptRestore(entry.src, entry.w); setSel([]); return }
     s.setSel(null) // mutual exclusion with the timeline selection
-    if (e.shiftKey && sel) setSel({ a: sel.a, b: entry.flatIdx })
-    else { setSel({ a: entry.flatIdx, b: entry.flatIdx }); dragRef.current = entry.flatIdx }
+    const i = entry.flatIdx
+    const now = performance.now(), c = clickRef.current
+    const clicks = (c.idx === i && now - c.t < 450) ? c.n + 1 : 1
+    clickRef.current = { idx: i, n: clicks, t: now }
+    if (clicks >= 3) {                         // triple — the whole sentence
+      dragRef.current = null
+      setSel((r) => (e.metaKey || e.ctrlKey ? [...r, sentenceAt(i)] : [sentenceAt(i)]))
+    } else if (e.shiftKey && sel.length) {     // shift — stretch the last piece
+      dragRef.current = sel[sel.length - 1].a
+      setSel((r) => [...r.slice(0, -1), { a: r[r.length - 1].a, b: i }])
+    } else if (e.metaKey || e.ctrlKey) {       // ⌘ — start a separate piece
+      dragRef.current = i
+      setSel((r) => [...r, { a: i, b: i }])
+    } else {                                   // plain click (and double-click)
+      dragRef.current = i
+      setSel([{ a: i, b: i }])
+    }
     s.setPlaying(false)
     s.setTime(entry.timelineT)
   }
+  // dragging past a word grows whichever piece the drag started in
   const wordEnter = (entry) => {
-    if (entry.kept && dragRef.current != null) setSel({ a: dragRef.current, b: entry.flatIdx })
+    if (!entry.kept || dragRef.current == null) return
+    const a = dragRef.current, b = entry.flatIdx
+    setSel((r) => (r.length ? [...r.slice(0, -1), { a, b }] : [{ a, b }]))
   }
-  const wordDouble = (entry) => {
-    if (entry.kept) { s.setTime(entry.timelineT); s.setPlaying(true) }
-  }
-
-  const selHas = (entry) => entry.kept && sel &&
-    entry.flatIdx >= Math.min(sel.a, sel.b) && entry.flatIdx <= Math.max(sel.a, sel.b)
-  const canSplit = !!sel
+  const selHas = (entry) => entry.kept && selIdx.has(entry.flatIdx)
+  const canSplit = selIdx.size > 0
 
   return (
     <div className="transcript">
@@ -241,7 +287,9 @@ export default function Transcript({ s }) {
         <button className="tx-split" disabled={!canSplit || busy} onClick={doSplit}>✂ Split</button>
         <div className="spacer" />
         <span className="tx-hint">
-          {busy ? 'listening to the audio…' : 'drag to select · ⌫ cut · ⏎ split · ⌘A all'}
+          {busy ? 'listening to the audio…'
+            : selIdx.size > 1 ? `${selIdx.size} words${sel.length > 1 ? ` in ${sel.length} pieces` : ''} · ⌫ cut`
+            : 'drag · ⇧ extend · ⌘ add · 3× sentence · ⌫ cut'}
         </span>
       </div>
 
@@ -274,10 +322,11 @@ export default function Transcript({ s }) {
               return (
                 <span key={`w-${i}`} id={entry.kept ? `tw-${entry.flatIdx}` : undefined}
                       className={`tx-word ${entry.kept ? 'kept' : 'deleted'} ${selHas(entry) ? 'sel' : ''}`}
-                      title={entry.kept ? 'drag to select · click seek · double-click play' : 'click to restore'}
+                      title={entry.kept
+                        ? 'drag to select · shift extends · ⌘ adds a piece · triple-click the sentence'
+                        : 'click to restore'}
                       onPointerDown={(e) => wordDown(e, entry)}
-                      onPointerOver={() => wordEnter(entry)}
-                      onDoubleClick={() => wordDouble(entry)}>
+                      onPointerOver={() => wordEnter(entry)}>
                   {entry.w.w}{' '}
                 </span>
               )

@@ -118,6 +118,21 @@ def build_voice_wav(project, pdir: Path, out_wav: Path):
 TS_RE = re.compile(r"\[(\d+):(\d+):(\d+)\.(\d+) -->")
 
 
+def whisper_threads():
+    """How many cores whisper may take.
+
+    All of them minus one is right when it runs alone, and wrong when the server
+    starts it alongside the import's 4K->720p transcode (REN-153): both then ask
+    for most of the machine and thrash. The server sets
+    VSTUDIO_WHISPER_THREADS to leave the transcode its share; on its own,
+    whisper still gets everything but one core."""
+    try:
+        n = int(os.environ.get("VSTUDIO_WHISPER_THREADS") or 0)
+    except ValueError:
+        n = 0
+    return max(2, n or ((os.cpu_count() or 4) - 1))
+
+
 def transcribe(wav: Path, lang: str, dur: float, tmpdir: str, use_vad: bool = True,
                model: Path = None):
     """whisper-cli with one-word segments; returns [(word, t0, t1)].
@@ -134,7 +149,7 @@ def transcribe(wav: Path, lang: str, dur: float, tmpdir: str, use_vad: bool = Tr
     base = Path(tmpdir) / "words"
     cmd = [whisper, "-m", str(model or find_model()), "-f", str(wav),
            "-l", lang, "-ml", "1", "-sow", "-oj", "-of", str(base),
-           "-t", str(max(2, (os.cpu_count() or 4) - 1))]
+           "-t", str(whisper_threads())]
     vad = find_vad_model() if use_vad else None
     if vad:
         # VAD keeps whisper from inventing words inside pauses; the word times

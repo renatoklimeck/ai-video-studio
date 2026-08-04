@@ -48,6 +48,9 @@ THUMB_LAST = {}
 HIST_LOCK = threading.Lock()   # history index.json read-modify-write
 CHAT_LOCK = threading.Lock()   # chat.json read-modify-write
 CHAT_RUNNING = {}              # pid -> job id of an in-flight Claude chat
+CHAT_SCRIPT_STEP = set()       # job ids that are the script-draft step (REN-153)
+AGENT_PROCS = {}               # job id -> Popen, so a finished step can be stopped
+CHAT_STOPPED = set()           # job ids stopped ON PURPOSE — not a failure to report
 PENDING_LOCK = threading.Lock()  # pending_edit.json read-modify-write (REN-129)
 
 
@@ -993,7 +996,28 @@ def codex_env():
     return env
 
 
-def run_agent(prompt, model_key, effort, timeout, cwd=None):
+def _run_capture(cmd, cwd, env, timeout, on_proc=None):
+    """subprocess.run, but the caller can get the Popen while it runs.
+
+    Needed so approving the script can stop an agent that has already done its
+    work and is only sitting there until the 30-minute timeout (REN-153)."""
+    proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if on_proc:
+        try:
+            on_proc(proc)
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def run_agent(prompt, model_key, effort, timeout, cwd=None, on_proc=None):
     """Run the chosen AI engine headless with full tool access. Returns a
     CompletedProcess whose .stdout is the agent's FINAL reply text.
     claude → claude -p (subscription via setup-token); codex → codex exec
@@ -1017,8 +1041,7 @@ def run_agent(prompt, model_key, effort, timeout, cwd=None):
             if spec.get("id"):
                 cmd += ["-m", spec["id"]]
             cmd.append(prompt)
-            r = subprocess.run(cmd, cwd=cwd, env=codex_env(), stdin=subprocess.DEVNULL,
-                               capture_output=True, text=True, timeout=timeout)
+            r = _run_capture(cmd, cwd, codex_env(), timeout, on_proc)
             try:
                 reply = Path(outp).read_text().strip()
             except OSError:
@@ -1037,8 +1060,7 @@ def run_agent(prompt, model_key, effort, timeout, cwd=None):
             "Claude CLI not installed — install Claude Code and run `claude setup-token`.")
     cmd = [CLAUDE_BIN, "-p", prompt, "--model", spec["id"],
            "--permission-mode", "bypassPermissions"]
-    return subprocess.run(cmd, cwd=cwd, env=claude_env(effort), stdin=subprocess.DEVNULL,
-                          capture_output=True, text=True, timeout=timeout)
+    return _run_capture(cmd, cwd, claude_env(effort), timeout, on_proc)
 
 
 def engine_auth_error(model_key, err: str):
@@ -1132,7 +1154,7 @@ def probe(path):
         return 0, 0, 0
 
 
-def run_job(cmd, cwd=None, total_hint=100, on_done=None):
+def run_job(cmd, cwd=None, total_hint=100, on_done=None, env=None):
     jid = uuid.uuid4().hex[:10]
     JOBS[jid] = {"status": "running", "progress": 0, "total": total_hint,
                  "log": [], "result": None, "started": time.time()}
@@ -1140,7 +1162,8 @@ def run_job(cmd, cwd=None, total_hint=100, on_done=None):
     def work():
         try:
             proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, text=True)
+                                    stderr=subprocess.STDOUT, text=True,
+                                    env={**os.environ, **env} if env else None)
             for line in proc.stdout:
                 line = line.strip()
                 if line.startswith("PROGRESS "):
@@ -1192,6 +1215,21 @@ def media_job(key: str, out: Path, make_cmd, meta: dict):
 
 def read_project(d: Path):
     return json.loads((d / "project.json").read_text())
+
+
+def source_key_for(d: Path, rel: str):
+    """Which source key a media path belongs to ("main", …), or None.
+
+    Lets every proxy request name its output after the source rather than after
+    the file on disk, so the import path and the client path agree on one file
+    instead of transcoding the same video twice (REN-153)."""
+    try:
+        for k, s in (read_project(d).get("sources") or {}).items():
+            if (s.get("path") or "") == rel:
+                return k
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 def write_project(d: Path, data: dict):
@@ -1377,7 +1415,7 @@ async def import_project(file: UploadFile):
                    "bg": None, "rt": None}]
     write_project(d, p)
     proxy_out = d / "media" / "proxy_main.mp4"
-    r = media_job(f"proxy:{dest}", proxy_out,
+    r = media_job(f"proxy:{dest.resolve()}", proxy_out,
                   lambda tmp: proxy_cmd(dest, tmp, w, h),
                   {"path": "media/proxy_main.mp4"})
     jid = r.get("job")
@@ -1395,20 +1433,26 @@ async def import_project(file: UploadFile):
             gen_thumb(d, force=True)
         except Exception:
             pass
-        # …then get the words, right now, while he is still looking at the video.
-        #
-        # Transcribing eight minutes takes two minutes, and it used to happen
-        # INSIDE the first edit: he clicked the preset and watched a spinner for
-        # the whole of it, on the AI's clock, which is also what made that step
-        # time out. Nothing about it depends on what he asks for, so it has no
-        # business being on the critical path. Started here it is almost always
-        # finished before he clicks anything.
+
+    # Get the words NOW, in parallel with the transcode — not after it.
+    #
+    # Transcribing eight minutes takes two, and it used to happen INSIDE the
+    # first edit: he clicked the preset and watched a spinner for all of it, on
+    # the AI's clock, which is also what made that step time out. Nothing about
+    # it depends on what he asks for, so it has no business on the critical
+    # path. It used to be started from attach_proxy, i.e. only after the 4K
+    # transcode finished ~10 minutes later, by which time the client and the
+    # agent had each started their own — three whisper runs on one file
+    # (REN-153). Started here it is usually done before he clicks anything, and
+    # start_transcript_job hands the transcode its share of the cores.
+    def warm_words():
         try:
             prewarm_transcript(d, "main")
         except Exception:  # noqa: BLE001 — an import must never fail over this
             pass
 
     threading.Thread(target=attach_proxy, daemon=True).start()
+    threading.Thread(target=warm_words, daemon=True).start()
     gen_thumb(d, force=True)
     return {"id": pid, "proxyJob": jid, "project": get_project(pid)}
 
@@ -1429,7 +1473,7 @@ async def import_take(pid: str, file: UploadFile):
         shutil.copyfileobj(file.file, f)
     w, h, dur = probe(dest)
     proxy_out = d / "media" / f"proxy_{key}.mp4"
-    r = media_job(f"proxy:{dest}", proxy_out,
+    r = media_job(f"proxy:{dest.resolve()}", proxy_out,
                   lambda tmp: proxy_cmd(dest, tmp, w or 1080, h or 1920),
                   {"path": f"media/{proxy_out.name}"})
     return {"key": key, "path": f"media/{dest.name}", "proxy": r["path"],
@@ -1620,15 +1664,52 @@ async def transcribe_source(pid: str, request: Request):
     lang = body.get("lang", "auto")
     if lang not in TRANSCRIBE_LANGS:
         raise HTTPException(400, "unsupported language")
-    out_rel = f"media/transcript_{key}.json"
-    jid = run_job([sys.executable, str(RENDER / "transcribe_source.py"),
-                   str(d), body["path"], out_rel, "--lang", lang])
-    return {"job": jid, "path": out_rel}
+    # goes through the same registry as the automatic prewarm (REN-153) — the
+    # client fires this on import at the same moment the import path starts one,
+    # and two whispers on the same audio is most of the twenty minutes
+    jid, joined = start_transcript_job(d, key, body["path"], lang)
+    return {"job": jid, "path": f"media/transcript_{key}.json", "joined": joined}
 
 
-PREWARM = {}                 # pid -> job id, so the UI can show it running
+# (pid, source key) -> job id. Keyed by SOURCE, not just project (REN-153): the
+# old pid-only key meant a second source started a rival whisper, and the
+# manual Transcribe button did not consult this registry at all. Three
+# whisper-cli runs on the same audio, each with -t 7 on an 8-core machine,
+# turned a 153s pass into 870-1051s — the "20 minutes" he reported.
+PREWARM = {}
 PREWARM_LOCK = threading.Lock()
 CUT_WARM = set()             # "pid:src" being decoded for cut boundaries (REN-164)
+
+
+def start_transcript_job(d: Path, key: str, rel: str, lang: str = "auto"):
+    """The ONE place a source transcription is launched.
+
+    Every caller goes through here, so a second request for a source already
+    being transcribed JOINS the running job instead of racing it. Returns
+    (job id, joined?).
+    """
+    with PREWARM_LOCK:
+        running = PREWARM.get((d.name, key))
+        if running and JOBS.get(running, {}).get("status") == "running":
+            return running, True
+        # Leave the import's transcode its cores while both run. Transcription
+        # now starts at t+0 instead of queuing behind the proxy, so the two DO
+        # overlap by design; without this they would each ask for 7 of 8 cores.
+        busy = any(JOBS.get(j["job"], {}).get("status") == "running"
+                   for j in MEDIA_JOBS.values())
+        cores = os.cpu_count() or 4
+        env = {"VSTUDIO_WHISPER_THREADS": str(max(2, cores - 3))} if busy else None
+        jid = run_job([sys.executable, str(RENDER / "transcribe_source.py"),
+                       str(d), rel, f"media/transcript_{key}.json", "--lang", lang],
+                      env=env)
+        PREWARM[(d.name, key)] = jid
+        return jid, False
+
+
+def transcript_job_running(d: Path, key: str):
+    """Job id of an in-flight transcription for this source, else None."""
+    jid = PREWARM.get((d.name, key))
+    return jid if jid and JOBS.get(jid, {}).get("status") == "running" else None
 
 
 def prewarm_transcript(d: Path, key="main"):
@@ -1645,15 +1726,7 @@ def prewarm_transcript(d: Path, key="main"):
         return None
     if not rel:
         return None
-    out_rel = f"media/transcript_{key}.json"
-    with PREWARM_LOCK:
-        running = PREWARM.get(d.name)
-        if running and JOBS.get(running, {}).get("status") == "running":
-            return running
-        jid = run_job([sys.executable, str(RENDER / "transcribe_source.py"),
-                       str(d), rel, out_rel, "--lang", "auto"])
-        PREWARM[d.name] = jid
-    return jid
+    return start_transcript_job(d, key, rel)[0]
 
 
 @app.get("/api/project/{pid}/prewarm")
@@ -1661,7 +1734,7 @@ def prewarm_status(pid: str):
     """Is the automatic transcription still running for this project?"""
     d = pdir(pid)
     fresh = any(k == "main" for k, _p in source_transcripts(d))
-    jid = PREWARM.get(d.name)
+    jid = PREWARM.get((d.name, "main"))
     st = JOBS.get(jid or "", {})
     return {"ready": fresh, "running": st.get("status") == "running",
             "progress": st.get("progress"), "total": st.get("total")}
@@ -1889,11 +1962,16 @@ async def make_proxy(pid: str, request: Request):
     d = pdir(pid)
     src = project_media(d, body["path"])
     (d / "media").mkdir(exist_ok=True)
-    out = d / "media" / f"proxy_{Path(src).stem}.mp4"
+    # Same key AND same output file as the import/take path (REN-153). They used
+    # to disagree on both: `proxy:{pid}:{src}` vs `proxy:{src}`, writing
+    # proxy_source.mp4 next to proxy_main.mp4 — byte for byte identical, 187s of
+    # transcode on three cores, run twice, exactly while whisper needed them.
+    # Naming the output after the SOURCE KEY makes the dedupe and the
+    # already-on-disk check both land.
+    key = source_key_for(d, body["path"]) or Path(src).stem
+    out = d / "media" / f"proxy_{key}.mp4"
     w, h, _ = probe(src)
-    # keyed by SOURCE: an import/take proxy job already transcoding this file
-    # is joined (and its output path adopted) instead of a duplicate transcode
-    return media_job(f"proxy:{pid}:{src}", out,
+    return media_job(f"proxy:{Path(src).resolve()}", out,
                      lambda tmp: proxy_cmd(src, tmp, w or 1080, h or 1920),
                      {"path": f"media/{out.name}"})
 
@@ -2309,7 +2387,23 @@ async def post_chat(pid: str, request: Request):
     preset = body.get("preset")
     preset = preset if isinstance(preset, str) else None
     chat_append(d, "you", message)
-    return {"job": _launch_chat_job(pid, d, message, model_key, effort, preset)}
+    # Off the request thread: building the prompt now waits for a transcription
+    # already in flight (REN-153), which can be a couple of minutes. The job id
+    # is allocated here so the client gets the real one to poll immediately.
+    jid = uuid.uuid4().hex[:10]
+    JOBS[jid] = {"status": "running", "progress": 0, "total": 1, "log": [],
+                 "result": None, "started": time.time()}
+    CHAT_RUNNING[pid] = jid
+
+    def launch():
+        try:
+            _launch_chat_job(pid, d, message, model_key, effort, preset, jid=jid)
+        except Exception as e:  # noqa: BLE001
+            JOBS[jid].update({"status": "error", "log": [str(e)]})
+            CHAT_RUNNING.pop(pid, None)
+
+    threading.Thread(target=launch, daemon=True).start()
+    return {"job": jid}
 
 
 def preset_by_id(pid: str):
@@ -2324,14 +2418,35 @@ def preset_by_id(pid: str):
 
 
 def _launch_chat_job(pid: str, d: Path, message: str, model_key: str, effort: str,
-                     preset_id: str = None) -> str:
+                     preset_id: str = None, jid: str = None) -> str:
     """Build the right prompt (script step vs edit) and spawn the chat worker.
-    Also called by approve_script to auto-resume the parked request (REN-129)."""
+    Also called by approve_script to auto-resume the parked request (REN-129).
+
+    `jid` lets the caller pre-allocate the job id and run this off the request
+    thread — it may wait on an in-flight transcription (REN-153), which must
+    never block an HTTP handler."""
     pj = d / "project.json"
     try:
         proj_now = read_project(d)
     except OSError:
         proj_now = {}
+
+    # WAIT for a transcription already in flight before describing what is on
+    # disk (REN-153). Without this the prompt below said "no transcript here",
+    # and the agent dutifully started its OWN whisper on a file that was already
+    # being transcribed — the third of the three simultaneous runs. Waiting
+    # costs nothing: the edit cannot proceed without those words anyway.
+    for _k in list((proj_now.get("sources") or {}).keys()):
+        tx_job = transcript_job_running(d, _k)
+        if not tx_job:
+            continue
+        if jid:
+            _mark_chat_running(d, jid, "reading the audio…")
+        deadline = time.time() + 900
+        while (JOBS.get(tx_job, {}).get("status") == "running"
+               and time.time() < deadline):
+            time.sleep(1.0)
+
     # only FRESH transcripts are advertised (a stale one = the wrong video's words)
     fresh_tx = source_transcripts(d)
     tx_lines = [f'  - source "{k}" → {p}' for k, p in fresh_tx]
@@ -2369,7 +2484,7 @@ def _launch_chat_job(pid: str, d: Path, message: str, model_key: str, effort: st
     if script_step and proj_script:
         # a draft already awaits review — no AI run needed: remind + park
         park_edit(d, message, model_key, effort, preset_id)
-        jid = uuid.uuid4().hex[:10]
+        jid = jid or uuid.uuid4().hex[:10]
         reply = ("O roteiro está na aba Script aguardando sua revisão — edite o que precisar e "
                  "clique “✓ Aprovar roteiro”. Assim que você aprovar, eu continuo este pedido "
                  "automaticamente.")
@@ -2462,10 +2577,12 @@ Reply to the user in 1-3 short sentences (plain text, same language as the user'
     take_pipeline = ((not clean_pipeline) and (not script_step) and script_approved
                      and _is_unedited(proj_now) and wants_first_cut(message))
 
-    jid = uuid.uuid4().hex[:10]
+    jid = jid or uuid.uuid4().hex[:10]
     JOBS[jid] = {"status": "running", "progress": 0, "total": 1, "log": [],
                  "result": None, "started": time.time()}
     CHAT_RUNNING[pid] = jid
+    if script_step:
+        CHAT_SCRIPT_STEP.add(jid)
     mtime_before = (d / "project.json").stat().st_mtime
     label = message if len(message) <= 34 else message[:34] + "…"
 
@@ -2523,8 +2640,21 @@ Reply to the user in 1-3 short sentences (plain text, same language as the user'
                                          "falling back to the older path; check the result.")
             # full tool access either engine (claude -p / codex exec); the user
             # opted into bypassed approvals for this local single-user app.
-            r = run_agent(prompt, model_key, effort, 1800)
+            # The script step reads a transcript and writes clean sentences. It
+            # is not where reasoning budget buys anything, and at "ultracode" it
+            # thinks its way through a 30-minute window before answering
+            # (REN-153). Cap it; the EDIT keeps whatever he chose.
+            step_effort = ("medium" if (script_step and CHAT_EFFORT_TOKENS.get(effort, 0)
+                                        > CHAT_EFFORT_TOKENS["medium"]) else effort)
+            r = run_agent(prompt, model_key, step_effort, 1800,
+                          on_proc=lambda pr: AGENT_PROCS.__setitem__(jid, pr))
             reply = (r.stdout or "").strip()
+            if jid in CHAT_STOPPED:
+                # stopped on purpose (the script it was drafting got approved) —
+                # a red "I couldn't complete that" here would be a lie
+                JOBS[jid].update({"status": "done", "progress": 1,
+                                  "result": "Script approved — moving on."})
+                return
             if r.returncode != 0 or not reply:
                 err = redact_secrets((r.stderr or reply or "the AI CLI failed").strip()[-500:])
                 err = engine_auth_error(model_key, err) or err
@@ -2619,6 +2749,9 @@ Reply to the user in 1-3 short sentences (plain text, same language as the user'
             snapshot_partial_edits("failed")
             chat_append(d, "claude", f"⚠ Something broke on my side: {e}")
         finally:
+            AGENT_PROCS.pop(jid, None)
+            CHAT_SCRIPT_STEP.discard(jid)
+            CHAT_STOPPED.discard(jid)
             if CHAT_RUNNING.get(pid) == jid:
                 CHAT_RUNNING.pop(pid, None)
             # the user may have approved WHILE the script step ran (the draft
@@ -2714,9 +2847,27 @@ async def approve_script(pid: str):
     write_project(d, cur)
     running = CHAT_RUNNING.get(pid)
     if running and JOBS.get(running, {}).get("status") == "running":
-        # a job is mid-flight; its finally-block resumes the parked edit once it
-        # ends (the client re-checks after attaching to this one)
-        return {"job": running, "busy": True, "approved": True}
+        # A SCRIPT STEP that is still alive has nothing left to do: the script
+        # it exists to write is on disk and has just been approved. It used to
+        # keep the edit parked until the agent hit its 30-minute timeout —
+        # thirteen minutes of dead waiting on a job that had already delivered
+        # (REN-153). Stop it and carry on; its finally-block does the cleanup.
+        if running in CHAT_SCRIPT_STEP:
+            proc = AGENT_PROCS.get(running)
+            if proc:
+                CHAT_STOPPED.add(running)
+                try:
+                    proc.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+                for _ in range(60):          # let the worker's finally run
+                    if JOBS.get(running, {}).get("status") != "running":
+                        break
+                    time.sleep(0.1)
+        else:
+            # a real edit is mid-flight; its finally-block resumes the parked
+            # request once it ends (the client re-attaches to this one)
+            return {"job": running, "busy": True, "approved": True}
     pend = pop_pending(d)
     if pend:
         chat_append(d, "claude", "✅ Script approved — carrying on with the edit…")
