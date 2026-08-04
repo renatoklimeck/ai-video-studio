@@ -12,7 +12,7 @@ const clone = (o) => structuredClone(o)
 
 // Signature of the retouch slider values — a processed preview is stale when
 // any of these change (mirrors the bg preview's in/out staleness).
-const RT_KEYS = ['intensity', 'smooth', 'even', 'blem', 'dewrinkle', 'shine', 'plump', 'eyes', 'circles']
+const RT_KEYS = ['v', 'intensity', 'smooth', 'even', 'blem', 'dewrinkle', 'shine', 'plump', 'eyes', 'circles']
 const rtSig = (rt) => RT_KEYS.map((k) => rt?.[k] ?? 0).join(',')
 
 // classify a dropped/pasted file by mime then extension (REN-85)

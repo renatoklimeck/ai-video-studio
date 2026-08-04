@@ -407,13 +407,16 @@ class Retouch:
         m3 = mask[:, :, None]
         under_m = under_m * mask
 
-        # THE SLIDERS MEAN WHAT THEY SAY (REN-177).
+        # THE SLIDERS MEAN WHAT THEY SAY (REN-177) — but only for clips saved
+        # since that change. `v` marks the new meaning.
         #
-        # This used to be 0.4 + 0.6*(intensity/100), and Intensity opens at 50 —
-        # so setting a fine-tune to 100 delivered 70, and every complaint that
-        # "nada muda mesmo no máximo" was partly this quietly halving him. The
-        # master is now a plain trim: 100 = the slider's own value.
-        m = rt.get("intensity", 100) / 100.0
+        # It used to be 0.4 + 0.6*(intensity/100) with Intensity opening at 50,
+        # so a fine-tune set to 100 delivered 70. Clips written before the change
+        # still carry intensity 50 MEANING 0.7, and reading that as 0.5 would
+        # quietly make every existing project weaker than it was. Old clips keep
+        # the old formula; nothing on disk is rewritten.
+        iv = rt.get("intensity", 100) / 100.0
+        m = iv if rt.get("v", 1) >= 2 else (0.4 + 0.6 * iv)
         s = {k: rt.get(k, 0) / 100.0 * m for k in
              ("smooth", "even", "blem", "shine", "plump", "eyes", "circles", "dewrinkle")}
         src = roi.astype(np.float32)

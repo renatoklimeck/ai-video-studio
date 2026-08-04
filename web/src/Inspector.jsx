@@ -49,11 +49,23 @@ function MaxWField({ value, onLive, onFocus }) {
 // 100 quietly delivered 70 — part of why the sliders felt like they did
 // nothing. The presets are set higher for the same reason: at the old numbers
 // "Natural" changed the skin by less than 1%.
-const RT_NATURAL = { preset: 'natural', intensity: 100, smooth: 45, even: 40, blem: 45, shine: 25, plump: 10, eyes: 15, circles: 20, dewrinkle: 30, scope: 'all' }
-const RT_STUDIO = { preset: 'studio', intensity: 100, smooth: 80, even: 70, blem: 80, shine: 45, plump: 20, eyes: 25, circles: 40, dewrinkle: 55, scope: 'all' }
-// On activate everything is zeroed (Renato's ask): nothing changes on screen
-// until a fine-tune leaves 0. ↺ resets to this.
-const RT_ZERO = { preset: 'custom', intensity: 100, smooth: 0, even: 0, blem: 0, shine: 0, plump: 0, eyes: 0, circles: 0, dewrinkle: 0, scope: 'all' }
+const RT_NATURAL = { v: 2, preset: 'natural', intensity: 100, smooth: 45, even: 40, blem: 45, shine: 25, plump: 10, eyes: 15, circles: 20, dewrinkle: 30, scope: 'all' }
+const RT_STUDIO = { v: 2, preset: 'studio', intensity: 100, smooth: 80, even: 70, blem: 80, shine: 45, plump: 20, eyes: 25, circles: 40, dewrinkle: 55, scope: 'all' }
+// Everything at zero. Only reachable through ↺ now — see the checkbox.
+const RT_ZERO = { v: 2, preset: 'custom', intensity: 100, smooth: 0, even: 0, blem: 0, shine: 0, plump: 0, eyes: 0, circles: 0, dewrinkle: 0, scope: 'all' }
+
+// SMOOTH SKIN IS THE FEATURE; the rest are trims (REN-192).
+//
+// Turning the card on used to zero everything, so the box did nothing until he
+// found the right slider — and he never did. His saved clips read
+// `smooth: 0, even: 100, blem: 100, dewrinkle: 99`: five maxed-out sliders that
+// are all LOCAL by nature (a blemish, a line, a highlight) and the one that
+// resurfaces the whole face left at zero. Measured on his frame, that setting
+// leaves the skin's unevenness at 99% of the original and shifts the colour a
+// little — which is exactly, word for word, what he reported seeing four times.
+//
+// So the checkbox now applies Natural. It is a retouch; it should retouch.
+const RT_ON = RT_NATURAL
 
 // A clip is PINNED when its scope is 'clip': he set that clip on purpose, and a
 // global change must never overwrite it.
@@ -88,8 +100,13 @@ export function spreadRt(c, pp, force = false) {
 // lives in store.js and is used from `s.rtSig`. It used to be duplicated here,
 // and adding a slider to one copy and not the other means a change he can see
 // on the sliders leaves a stale "✓ processed" preview on screen.
+// Smooth skin is shown on its own, ABOVE the fine-tunes: it is the one that
+// resurfaces the whole face, and buried in a list of eight it read as just
+// another trim (REN-192). The rest only touch what their name says — a
+// blemish, a line, a highlight — so maxing all of them and leaving this at 0
+// changes almost nothing, which is what happened.
 const RT_SLIDERS = [
-  ['smooth', 'Smooth skin'], ['even', 'Even tone'], ['blem', 'Clear blemishes'],
+  ['even', 'Even tone'], ['blem', 'Clear blemishes'],
   ['dewrinkle', 'Dewrinkle'], ['shine', 'De-shine'], ['plump', 'Plump'],
   ['eyes', 'Brighten eyes'], ['circles', 'Dark circles'],
 ]
@@ -160,6 +177,14 @@ export default function Inspector({ s }) {
     const v = parseInt(e.target.value, 10) || 0
     editLive((c, pp) => {
       if (!c.rt) return
+      // Touching a slider brings a pre-REN-177 clip into the new meaning of
+      // Intensity, converted so it looks EXACTLY the same at that moment
+      // (old m = 0.4 + 0.6·i/100, new m = i/100). Without this his older clips
+      // would stay quietly at 70% of what their numbers say.
+      if ((c.rt.v ?? 1) < 2) {
+        c.rt.intensity = Math.round(40 + 0.6 * (c.rt.intensity ?? 50))
+        c.rt.v = 2
+      }
       c.rt[field] = v
       c.rt.preset = 'custom'
       if (c.rt.processed) c.rt.stale = true // tuning invalidates the processed preview
@@ -346,7 +371,7 @@ export default function Inspector({ s }) {
               <div className="insp-row-between">
                 <label className="check">
                   <input type="checkbox" checked={!!rt}
-                         onChange={(e) => edit((c) => { c.rt = e.target.checked ? { ...RT_ZERO } : null })} />
+                         onChange={(e) => edit((c) => { c.rt = e.target.checked ? { ...RT_ON } : null })} />
                   Face retouch
                 </label>
                 {rt && <span className="rt-reset" title="Reset (all zeroed)"
@@ -368,8 +393,18 @@ export default function Inspector({ s }) {
                             onClick={() => edit((c) => { c.rt = { ...RT_STUDIO, scope: c.rt.scope } })}>Studio</button>
                     <button className={rt.preset === 'custom' ? 'on' : ''} style={{ cursor: 'default' }}>Custom</button>
                   </div>
-                  <label className="slider-label rt-intensity">Intensity · {rt.intensity ?? 50}
-                    <input type="range" min="0" max="100" step="1" value={rt.intensity ?? 50}
+                  {/* the main control, on its own (REN-192) */}
+                  <label className="slider-label rt-intensity">Smooth skin · {rt.smooth ?? 0}
+                    <input type="range" min="0" max="100" step="1" value={rt.smooth ?? 0}
+                           onPointerDown={beginGesture} onChange={setRt('smooth')} />
+                  </label>
+                  {(rt.smooth ?? 0) === 0 && (
+                    <div className="warn-note">⚠ <span>Smooth skin is at 0, so the skin itself
+                      is untouched. The controls below only change what their name says — a
+                      blemish, a line, a highlight.</span></div>
+                  )}
+                  <label className="slider-label">Overall strength · {rt.intensity ?? 100}
+                    <input type="range" min="0" max="100" step="1" value={rt.intensity ?? 100}
                            onPointerDown={beginGesture} onChange={setRt('intensity')} />
                   </label>
                   <div className="rt-finetune-label">Fine-tune</div>
