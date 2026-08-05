@@ -66,6 +66,13 @@ export default function UpdateButton() {
 
   if (!state && phase === 'idle') return null
 
+  // Whether to lead with the version NAME. Normally yes. But the offer is
+  // driven by a COMMIT count, not by the version, so a fix pushed between two
+  // releases is offered while VERSION has not moved — and then the box read
+  // "2026.08.04.8 — you have 2026.08.04.8", which is nonsense. In that case
+  // lead with what actually changed instead.
+  const named = (a) => !!a?.latestVersion && a.latestVersion !== a.version
+
   return (
     <div className="updater">
       {ask && phase === 'idle' && (
@@ -76,13 +83,13 @@ export default function UpdateButton() {
                 header will show afterwards, so it is what to compare against.
                 Checkouts older than the VERSION file have none: fall back to
                 the commit subject rather than showing an empty box. */}
-            {ask.latestVersion
+            {named(ask)
               ? <p className="update-ask-what">
                   <span className="update-ask-ver">{ask.latestVersion}</span>
                   {ask.version ? <span className="update-ask-from"> — you have {ask.version}</span> : null}
                 </p>
               : <p className="update-ask-what">{ask.latest}</p>}
-            {ask.latestVersion && ask.latest && <p className="update-ask-sub">{ask.latest}</p>}
+            {named(ask) && ask.latest && <p className="update-ask-sub">{ask.latest}</p>}
             <p className="update-ask-note">
               It takes about a minute. Your projects are not touched, and if
               anything fails it puts the working version back.
@@ -99,9 +106,15 @@ export default function UpdateButton() {
       )}
       {phase === 'idle' && (
         <button className="btn-update" onClick={run}
-                title={state.latestVersion ? `Update to ${state.latestVersion}`
+                title={named(state) ? `Update to ${state.latestVersion}`
                      : state.latest ? `Latest: ${state.latest}` : 'Install the new version'}>
-          ↑ Update{state.behind > 1 ? ` (${state.behind})` : ''}
+          {/* the count is its own element so CSS can drop it on a narrow phone.
+              `behind` is a raw commit count, so a student who has not updated
+              in a while sits at two or three digits, and "↑ Update (12)" is
+              wide enough to shave the ☰ off the right edge of a 320px screen.
+              Capping it at "9+" does not help — that string is WIDER than
+              "12" in this font (measured: 99.8px vs 97.1px). */}
+          ↑ Update{state.behind > 1 ? <span className="update-count"> ({state.behind})</span> : null}
         </button>
       )}
       {phase === 'running' && (

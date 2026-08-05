@@ -302,13 +302,35 @@ input[type="range"] { accent-color: var(--accent); width: 100%; margin: 0; }
   height: 52px; flex-shrink: 0; display: flex; align-items: center; gap: 10px;
   padding: 0 14px; background: var(--bg-panel); border-bottom: 1px solid var(--border-subtle);
 }
-.header .name-wrap { display: flex; align-items: baseline; gap: 10px; min-width: 0; overflow: hidden; }
+/* flex-shrink 100 so the project title is the FIRST thing to give when the
+   header runs short — it already ellipsises, and losing the end of a filename
+   costs nothing next to losing "Auto zoom" off the button row. */
+.header .name-wrap { display: flex; align-items: baseline; gap: 10px; min-width: 0; overflow: hidden; flex-shrink: 100; }
 .header .proj-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.save-ind { font-size: 11px; font-family: var(--font-mono); white-space: nowrap; }
+.save-ind { font-size: 11px; font-family: var(--font-mono); white-space: nowrap;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .save-ind.saving { color: var(--warning); }
 .save-ind.saved { color: var(--success); }
+/* On a phone the update chip takes the room this used to have, and .name-wrap
+   clips with overflow:hidden — so "✓ all changes saved" came out as "✓ all ch",
+   which reads like a truncated error. Drop it entirely while the chip is up:
+   the chip is the thing to act on, and the status comes back the moment the
+   update is installed. */
+@media (max-width: 520px) {
+  .header:has(.btn-update) .save-ind { display: none; }
+}
 .divider { width: 1px; height: 22px; background: rgba(255,255,255,0.08); margin: 0 4px; flex-shrink: 0; }
-.add-group { display: flex; gap: 6px; }
+/* The "+ Video / + Caption / … / Auto zoom" row is 637px and was the only thing
+   in this header allowed to keep its full size, so on a 1280px laptop the
+   header measured 1363px and pushed EXPORT completely off the screen — where
+   `.editor { overflow: hidden }` swallowed it with no scrollbar to get it back.
+   (Pre-existing; found while adding the update chip, which made the same header
+   83px wider still.) This group is the one part that can give: let it scroll,
+   and pin everything to its right so the primary action is always reachable. */
+.add-group { display: flex; gap: 6px; min-width: 0; overflow-x: auto; }
+.add-group > * { flex: none; }
+.header > .btn-primary, .header .btn-claude, .header .btn-ghost,
+.header .audioout, .header .app-version, .header .btn-menu { flex: none; }
 .spacer { flex: 1; }
 .btn-claude {
   height: 30px; padding: 0 12px; border-radius: 8px;
@@ -330,6 +352,10 @@ input[type="range"] { accent-color: var(--accent); width: 100%; margin: 0; }
   background: var(--bg-elevated); border: 1px solid var(--border-default);
   border-radius: 14px; padding: 8px; display: flex; flex-direction: column; gap: 2px;
   box-shadow: var(--shadow-menu); animation: vsFadeUp .18s ease;
+  /* A phone held sideways is 375px tall and this menu is ~430px — everything
+     from Aspect down, including the version, fell off the bottom with no way
+     to reach it. Scroll instead of overflowing. */
+  max-height: calc(100vh - 68px); overflow-y: auto;
 }
 .menu-row {
   height: 44px; display: flex; align-items: center; gap: 10px; padding: 0 12px;
@@ -342,6 +368,9 @@ input[type="range"] { accent-color: var(--accent); width: 100%; margin: 0; }
 .menu-aspect { display: flex; align-items: center; justify-content: space-between; padding: 6px 12px 10px; }
 .menu-aspect span { font-size: 12px; color: var(--text-muted); }
 .menu-aspect .seg button { height: 32px; padding: 0 12px; }
+/* release name at the foot of the mobile menu — the desktop header shows it
+   next to the update chip, and a phone has no header room for it */
+.menu-version { padding: 2px 12px 8px; text-align: center; }
 
 /* ══════════ player ══════════ */
 
@@ -1250,17 +1279,42 @@ input[type="range"] { accent-color: var(--accent); width: 100%; margin: 0; }
 .app-version.inline { opacity: .8; }
 
 /* in-app updater (header) */
-.updater { position: relative; }
+/* flex:none on both — on a 375px phone the header runs out of room and flex
+   was shrinking the chip to 62px, which wrapped "↑ Update" onto two lines
+   inside a fixed 28px box and spilled the text out of the button. The chip is
+   only on screen when there IS an update, so it wins the space; what gives
+   instead is the project title and then the save status (hidden below). */
+.updater { position: relative; flex: none; }
 .btn-update {
   height: 28px; padding: 0 10px; font-size: 12px; font-weight: 500;
   color: #0e1016; background: var(--accent, #8a93ff); border: 0;
   border-radius: 7px; cursor: pointer;
+  display: inline-flex; align-items: center; white-space: nowrap; flex: none;
 }
 .btn-update:hover { filter: brightness(1.08); }
+/* "how many commits behind" is a nice-to-know that costs ~25px. On a 320px
+   screen (iPhone SE, split screen, iPad Slide Over) that 25px is exactly what
+   pushes the ☰ past the edge, so below 360 the chip drops it and just says
+   Update. Nothing is lost: the count was never actionable. */
+@media (max-width: 359px) { .update-count { display: none; } }
 .updater-pop {
   position: absolute; right: 0; top: 34px; z-index: 60; width: 280px; padding: 10px;
   background: var(--bg-card, #17171b); border: 1px solid var(--border);
   border-radius: 10px; box-shadow: 0 12px 34px rgba(0,0,0,.5);
+}
+/* On a phone the chip sits in the MIDDLE of the header, not at its right edge,
+   so a 280px panel hung off `right: 0` starts 38px to the LEFT of the screen
+   and the first word of every progress line is cut off. Below this width, pin
+   it to the viewport instead of to the chip.
+   Anchored to the BOTTOM, not the top: the same component renders in the
+   editor (chip in a 52px header) and on the library screen (chip beside the
+   logo, ~96px down), so any fixed `top` that clears one covers the other. The
+   bottom is empty in both, and a status panel down there is the ordinary
+   mobile shape for this anyway. */
+@media (max-width: 520px) {
+  .updater-pop {
+    position: fixed; top: auto; bottom: 12px; left: 12px; right: 12px; width: auto;
+  }
 }
 .updater-head { font-size: 12px; color: var(--text-primary); margin-bottom: 6px; }
 .updater-line {

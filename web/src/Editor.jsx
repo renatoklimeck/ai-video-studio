@@ -136,9 +136,17 @@ export default function Editor({ s }) {
             {/* which release this is (REN-168) — a student reporting a bug can
                 read it off the header instead of digging in the terminal */}
             {s.appVersion && <span className="app-version" title="Version of AI Video Studio">{s.appVersion}</span>}
-            <UpdateButton />
           </>
         )}
+        {/* OUTSIDE the !isMobile block on purpose. It used to live inside, and
+            since the editor is where you actually spend your time, a student
+            who opened the app on a phone and went straight into a project was
+            never told a new version existed — they could sit on a version with
+            bugs already fixed for months. It renders nothing at all when there
+            is nothing to install, so it costs no header space in the normal
+            case. The version NUMBER stays desktop-only (it is reference text,
+            not an action) and moves into the ☰ menu below on mobile. */}
+        <UpdateButton />
         <button className="btn-primary" onClick={s.openExport}>Export</button>
         {s.isMobile && (
           <button className="btn-menu" title="Menu" onClick={() => s.setMenuOpen(!s.menuOpen)}>☰</button>
@@ -171,6 +179,13 @@ export default function Editor({ s }) {
               <span>Aspect</span>
               {aspectSeg(32)}
             </div>
+            {/* the release name, so someone reporting a bug from a phone can
+                read it off instead of being asked to open a terminal */}
+            {s.appVersion && (
+              <div className="menu-version">
+                <span className="app-version inline">{s.appVersion}</span>
+              </div>
+            )}
           </div>
         </div>
       )}
