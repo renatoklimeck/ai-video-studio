@@ -37,6 +37,20 @@ LABEL="${LABEL:-com.aivideostudio.server}"
 exec >"$LOG" 2>&1
 say() { printf "%s\n" "$*"; }
 
+# Ask the server ONE more time, now, before anything is touched. The auto path
+# decided this was a good moment up to a minute ago; a render started since
+# then would be killed by the restart at the end of this script.
+PORT="${VSTUDIO_PORT:-3030}"
+for scheme in https http; do
+  BUSY="$(curl -sk --max-time 5 "$scheme://127.0.0.1:$PORT/api/update/busy" 2>/dev/null || true)"
+  [ -n "$BUSY" ] && break
+done
+case "$BUSY" in
+  *'"busy": null'*|*'"busy":null'*|"") ;;   # idle, or the server did not answer
+  *) say "DONE deferred"                     # something is running — try later
+     exit 0 ;;
+esac
+
 say "STEP fetching the new version"
 # Local edits must never block an update, and must never be thrown away either:
 # stash them, update, put them back. Tracked files only — sweeping up untracked
@@ -111,7 +125,20 @@ say "STEP rebuilding the interface"
 restore
 
 record ok
+# Wait for the machine to be idle before the kill. The build above takes a
+# minute, and `launchctl kickstart -k` takes down the server's whole process
+# group — every ffmpeg, whisper and agent child with it. Bounded, because the
+# new interface is already on disk and old server + new bundle is a mismatch we
+# do not want to sit in.
 say "STEP restarting"
+for _ in $(seq 1 60); do
+  B="$(curl -sk --max-time 5 "https://127.0.0.1:$PORT/api/update/busy" 2>/dev/null \
+       || curl -s --max-time 5 "http://127.0.0.1:$PORT/api/update/busy" 2>/dev/null || true)"
+  case "$B" in
+    *'"busy": null'*|*'"busy":null'*|"") break ;;
+    *) sleep 20 ;;
+  esac
+done
 # launchd brings it straight back (KeepAlive). The browser is polling
 # /api/version and reloads itself as soon as the new build answers.
 say "DONE ok"

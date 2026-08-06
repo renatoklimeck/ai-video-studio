@@ -2447,6 +2447,15 @@ def _auto_update_loop():
         time.sleep(AUTO_EVERY)
 
 
+@app.get("/api/update/busy")
+def update_busy():
+    """Is it safe to restart RIGHT NOW? update.sh asks again immediately before
+    it touches anything, because between the updater deciding and the pull
+    finishing there are 30-90 seconds in which the user can start a 20-minute
+    export — and the restart at the end would kill it."""
+    return {"busy": busy_reason()}
+
+
 @app.get("/api/settings")
 def get_settings():
     return {"autoUpdate": auto_update_on(),

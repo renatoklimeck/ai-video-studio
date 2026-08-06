@@ -76,6 +76,8 @@ export function useStudio() {
   const [compare, setCompare] = useState(false)
   const [inlineEdit, setInlineEdit] = useState(null)  // {type:'cap'|'text', id} | null
   const [exp, setExp] = useState({ phase: 'choose', pct: 0, quality: 'final', out: null, filename: null, log: [] })
+  // what this tab is watching right now — read by the auto-reload
+  const busyRef = useRef(() => false)
   const [transc, setTransc] = useState({ phase: 'choose', pct: 0, added: null, log: [] })
   const [bgJob, setBgJob] = useState(null)            // clip id being processed
   const [bgJobPct, setBgJobPct] = useState(0)
@@ -219,6 +221,8 @@ export function useStudio() {
     if (from && from !== appVersion) showToast(`Updated to ${appVersion}`)
   }, [appVersion, showToast])
 
+  busyRef.current = () => exp.phase === 'rendering' || claudeTyping || !!bgJob
+
   useEffect(() => {
     const onResize = () => { if (window.innerWidth > 0) setVw(window.innerWidth) }
     window.addEventListener('resize', onResize)
@@ -278,6 +282,11 @@ export function useStudio() {
         if (!build) return
         if (base == null) { base = build; return }
         if (build !== base) {
+          // Do not yank the page out from under work THIS tab is watching. The
+          // server refuses to update while a job runs, but the bundle can land
+          // during the build step; reloading now would drop an export's
+          // progress panel for no reason. Next tick (60s) will do it.
+          if (busyRef.current()) return
           await flushSave()
           // Remember what we came from, so the page can say what it updated to
           // once it is back. Cleared by the toast that reads it.

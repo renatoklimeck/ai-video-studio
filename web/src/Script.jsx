@@ -9,7 +9,22 @@ export default function Script({ s }) {
   const taRef = useRef(null)
   const [busy, setBusy] = useState('') // '' | 'gen' | 'apply' | 'approve'
   const [err, setErr] = useState('')
-  const [draft, setDraft] = useState(p?.script || '')
+  // Same reason as the chat draft: the app can reload under you now (it
+  // installs updates by itself), and this box only committed onBlur — so
+  // whatever you had typed since the last click-away was gone.
+  const draftKey = `vs-script-draft-${pid || ''}`
+  const restored = useRef(false)
+  const [draft, _setDraft] = useState(() => {
+    try {
+      const d = sessionStorage.getItem(draftKey)
+      if (d != null) { restored.current = true; return d }
+    } catch { /* private mode */ }
+    return p?.script || ''
+  })
+  const setDraft = (v) => {
+    _setDraft(v)
+    try { sessionStorage.setItem(draftKey, v) } catch { /* private mode */ }
+  }
   const hasCaptions = (p?.captions?.length || 0) > 0
   // while the AI edits (chat job running), lock this tab — editing the script
   // mid-run would revoke approval / clobber the in-flight edit
@@ -18,6 +33,8 @@ export default function Script({ s }) {
   // external write) — but never while the user is actively typing.
   useEffect(() => {
     if (taRef.current && document.activeElement === taRef.current) return
+    // do not wipe a draft we just restored from a reload on the very first run
+    if (restored.current) { restored.current = false; return }
     setDraft(p?.script || '')
   }, [pid, p?.script])
 
@@ -25,6 +42,7 @@ export default function Script({ s }) {
   // the creator re-approved after the change (REN-127)
   const save = () => {
     if (draft !== (p?.script || '')) s.mutate((pp) => { pp.script = draft; pp.scriptApproved = false }, false)
+    try { sessionStorage.removeItem(draftKey) } catch { /* private mode */ }
   }
   // server-side approval; if an edit was waiting for it, it resumes automatically
   const approve = () => run('approve', s.approveScript, 'Generate or write the script first.')
