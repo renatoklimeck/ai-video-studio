@@ -2331,8 +2331,19 @@ def update_check():
 # update stashes the working tree.
 UPDATE_STATE = UPDATE_LOG.with_name("AIVideoStudio-update-state.json")
 _UPDATE_LOCK = threading.Lock()
-_UPDATING = [0.0]          # when the running update started (0 = none)
-UPDATE_STUCK_AFTER = 20 * 60
+_UPDATE_PROC = [None]      # the running update.sh, or None
+
+def update_in_progress():
+    """Ask the PROCESS, not a flag. update.sh exits without restarting us when
+    it defers or fails, and a flag set at spawn time then stayed on — one
+    deferral blocked every later attempt for twenty minutes."""
+    proc = _UPDATE_PROC[0]
+    if proc is None:
+        return False
+    if proc.poll() is not None:      # it exited: deferred, failed, or done
+        _UPDATE_PROC[0] = None
+        return False
+    return True
 SETTINGS_FILE = Path.home() / ".claude" / "video-studio-settings.json"
 # Tunable so support (and the test rig) can make this fast or turn the pacing
 # down on a machine that is always busy.
@@ -2361,9 +2372,7 @@ def busy_reason():
     process GROUP, so a restart takes every ffmpeg, whisper and agent child with
     it — a 20-minute export dies at 19 minutes and the student is told nothing
     except that the job vanished."""
-    # a FAILED update leaves the server alive with the flag still set; without
-    # the age check it would never auto-update again
-    if _UPDATING[0] and time.time() - _UPDATING[0] < UPDATE_STUCK_AFTER:
+    if update_in_progress():
         return "an update is already running"
     if any(j.get("status") == "running" for j in JOBS.values()):
         return "a job is running"
@@ -2396,9 +2405,8 @@ def _start_update(auto=False, target=""):
     if not script.exists():
         return {"started": False, "reason": "update script missing"}
     with _UPDATE_LOCK:
-        if _UPDATING[0] and time.time() - _UPDATING[0] < UPDATE_STUCK_AFTER:
+        if update_in_progress():
             return {"started": False, "reason": "already running"}
-        _UPDATING[0] = time.time()
     try:
         UPDATE_LOG.parent.mkdir(parents=True, exist_ok=True)
         UPDATE_LOG.write_text("STEP starting\n")
@@ -2406,9 +2414,10 @@ def _start_update(auto=False, target=""):
             {"target": target, "auto": auto, "started": int(time.time())}))
     except OSError:
         pass
-    subprocess.Popen(["/bin/bash", str(script)], cwd=str(ROOT),
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     start_new_session=True)
+    _UPDATE_PROC[0] = subprocess.Popen(
+        ["/bin/bash", str(script)], cwd=str(ROOT),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True)
     return {"started": True}
 
 
