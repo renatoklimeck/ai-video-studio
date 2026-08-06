@@ -92,6 +92,14 @@ export function useStudio() {
   const [chatInput, setChatInput] = useState('')
   const [claudeTyping, setClaudeTyping] = useState(false)
   // Which Claude model + reasoning effort the chat uses (REN-118); remembered
+  // Which ENGINE a picker key means. The key is "<engine>:<id>"; legacy short
+  // keys ('opus', 'sonnet', 'fable') are Claude, 'codex' is Codex.
+  const engineOf = (key) => {
+    const k = String(key || '')
+    if (k.includes(':')) return k.split(':')[0]
+    return k === 'codex' ? 'codex' : 'claude'
+  }
+
   // per-user in localStorage. Keys map to real --model ids on the server.
   // guard against a stale saved value (e.g. a model we removed) → valid default
   const [chatModel, setChatModelState] = useState(() => {
@@ -174,10 +182,16 @@ export function useStudio() {
         if (dead) return
         setEngines(r)
         setChatModelState((prev) => {
-          const eng = prev === 'codex' ? 'codex' : 'claude'
+          // split(':'), NÃO `prev === 'codex'`: a chave canônica é
+          // "<engine>:<id>", então 'codex:' e 'codex:gpt-5.5-codex' caíam no
+          // ramo 'claude' e o fallback reescrevia a escolha do usuário.
+          const eng = engineOf(prev)
           if (r[eng] !== false) return prev
-          const fallback = eng === 'claude' && r.codex ? 'codex'
-            : eng === 'codex' && r.claude ? 'opus' : prev
+          // canonical "<engine>:<id>" keys, not the legacy short ones — 'opus'
+          // resolves to Opus 4.8 on the server, so falling back to it silently
+          // downgraded the model
+          const fallback = eng === 'claude' && r.codex ? 'codex:'
+            : eng === 'codex' && r.claude ? 'claude:claude-opus-5' : prev
           if (fallback !== prev) localStorage.setItem('vs-chat-model', fallback)
           return fallback
         })
@@ -1524,6 +1538,11 @@ export function useStudio() {
     transcriptDelete, transcriptRestore, transcriptSplitSource,
     chatOpen, setChatOpen, chatMsgs, chatInput, setChatInput, claudeTyping,
     chatModel, chatEffort, setChatModel, setChatEffort, engines, models, rescanModels,
+    // The name of the engine that will actually run the next edit. Everything
+    // user-visible that used to say "Claude" reads this instead: a Codex user
+    // was told, in the header, in the tab and on every reply, that Claude did
+    // work Codex did. (Reported by the first outside tester.)
+    engineName: engineOf(chatModel) === 'codex' ? 'Codex' : 'Claude',
     presets, savePresets, editingPreset, setEditingPreset, generateScript, applyScriptToCaptions,
     scriptAlert, setScriptAlert,
     sinkSupported, sinks, sinkId, setSinkId, loadSinks,

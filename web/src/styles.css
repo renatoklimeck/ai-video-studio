@@ -327,7 +327,14 @@ input[type="range"] { accent-color: var(--accent); width: 100%; margin: 0; }
    (Pre-existing; found while adding the update chip, which made the same header
    83px wider still.) This group is the one part that can give: let it scroll,
    and pin everything to its right so the primary action is always reachable. */
-.add-group { display: flex; gap: 6px; min-width: 0; overflow-x: auto; }
+/* flex-shrink 0 so it does NOT give up a single pixel while the title still has
+   room to give. With shrink:1 flexbox splits any deficit proportionally, so the
+   row lost ~3px even when the title had 60px of slack left — and 3px is enough
+   to put a scrollbar under the buttons. Below 1200px the title's slack really
+   is exhausted, so the row goes back to scrolling: a scrollbar under the
+   buttons beats pushing Export off the screen. */
+.add-group { display: flex; gap: 6px; min-width: 0; overflow-x: auto; flex-shrink: 0; }
+@media (max-width: 1199px) { .add-group { flex-shrink: 1; } }
 .add-group > * { flex: none; }
 .header > .btn-primary, .header .btn-claude, .header .btn-ghost,
 .header .audioout, .header .app-version, .header .btn-menu { flex: none; }
@@ -1277,6 +1284,18 @@ input[type="range"] { accent-color: var(--accent); width: 100%; margin: 0; }
   opacity: .65; letter-spacing: .2px; user-select: text; white-space: nowrap;
 }
 .app-version.inline { opacity: .8; }
+/* The release name is reference text — you read it when reporting a bug, not
+   while editing. Below this width the header needs those ~92px for the button
+   row, which is the difference between everything fitting and a scrollbar.
+   It stays on the library screen (no button row there) and in the ☰ menu. */
+@media (max-width: 1399px) { .header .app-version { display: none; } }
+
+/* "one of your engines is missing" note under the chat controls */
+.engine-note {
+  margin: 6px 2px 0; padding: 7px 9px; font-size: 11px; line-height: 1.45;
+  color: var(--text-muted); background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-subtle); border-radius: 8px;
+}
 
 /* in-app updater (header) */
 /* flex:none on both — on a 375px phone the header runs out of room and flex

@@ -31,7 +31,7 @@ export default function Chat({ s, embedded = false }) {
       {!embedded && (
         <div className="chat-header">
           <span className="chat-dot" />
-          <div className="chat-title">Claude</div>
+          <div className="chat-title">{s.engineName}</div>
           <div className="chat-badge">{modelLabel(s.chatModel, s.models)}</div>
           <div className="spacer" />
           {s.isMobile && <span className="chat-close" onClick={() => s.setChatOpen(false)}>✕</span>}
@@ -40,7 +40,9 @@ export default function Chat({ s, embedded = false }) {
       <div className="chat-msgs">
         {s.chatMsgs.map((m, i) => (
           <div key={i} className={`chat-msg ${m.who === 'claude' ? 'claude' : 'you'}`}>
-            <div className="chat-who">{m.who === 'claude' ? 'Claude' : 'you'}</div>
+            {/* 'claude' is the stored role, not the brand — a reply written
+                by codex exec is saved under the same role. Show the engine. */}
+            <div className="chat-who">{m.who === 'claude' ? s.engineName : 'you'}</div>
             <div className="chat-bubble">{m.text}</div>
           </div>
         ))}
@@ -78,7 +80,7 @@ export default function Chat({ s, embedded = false }) {
           placeholder='Ask for a revision… e.g. “make the captions bigger and trim the silence in take 2”'
         />
         <div className="chat-controls">
-          <label className="chat-pick" title="Which Claude model runs the edit">
+          <label className="chat-pick" title="Which AI model runs the edit">
             <span>Model</span>
             <select value={s.chatModel} onChange={(e) => s.setChatModel(e.target.value)}>
               {(s.models || []).map((m) => (
@@ -104,6 +106,20 @@ export default function Chat({ s, embedded = false }) {
           <div className="spacer" />
           <button className="btn-send" onClick={s.sendChat}>Send ⏎</button>
         </div>
+        {/* A missing engine used to be SILENT: the picker just quietly offered
+            fewer models, and the first outside tester spent his session
+            thinking the app only supported Codex. Say it, and say what to do.
+            `engines` is only false once /api/engines has answered, so this
+            cannot flash on load. */}
+        {s.engines && (s.engines.claude === false || s.engines.codex === false) && (
+          <div className="engine-note">
+            {s.engines.claude === false && s.engines.codex === false
+              ? 'No AI CLI found — install Claude Code (npm i -g @anthropic-ai/claude-code) or Codex (npm i -g @openai/codex), then log in.'
+              : s.engines.claude === false
+                ? 'Claude Code CLI not found, so only Codex is offered. Install it with npm i -g @anthropic-ai/claude-code and reload — Opus, Sonnet and Fable then show up here.'
+                : 'Codex CLI not found (or not logged in), so only Claude models are offered.'}
+          </div>
+        )}
       </div>
     </div>
   )

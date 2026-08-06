@@ -107,8 +107,8 @@ export default function Editor({ s }) {
               <button className="btn-add teal" title="Import source video as a new take"
                       onClick={pickFile(takeFileRef)}>+ Video</button>
               <button className="btn-add" onClick={s.addCaption}>+ Caption</button>
-              <button className="btn-add" onClick={s.addText}>+ Headline</button>
-              <button className="btn-add" onClick={pickFile(ovFileRef)}>+ Image/Video</button>
+              <button className="btn-add" onClick={s.addText}>+ Text</button>
+              <button className="btn-add" onClick={pickFile(ovFileRef)}>+ Media</button>
               <button className="btn-add" onClick={pickFile(audFileRef)}>+ Music</button>
               <button className="btn-add" title="Transcribe the voice into word-synced captions (re-run after cuts to refresh them)"
                       onClick={s.openTranscribe}>{s.project?.captions?.length ? 'Retranscribe' : 'Transcribe'}</button>
@@ -125,13 +125,19 @@ export default function Editor({ s }) {
         <div className="spacer" />
         {!s.isMobile && (
           <>
-            <button className={`btn-claude ${s.chatOpen ? 'on' : ''}`} onClick={() => s.setChatOpen(!s.chatOpen)}>
-              <span className="claude-dot" />Claude
-            </button>
-            <div className="divider" />
+            {/* Was a wide green button that said "Claude". Two problems: it
+                cost ~80px in a header that already did not fit, and it named an
+                engine it has nothing to do with — it only shows/hides the left
+                panel, so a Codex user was told "Claude" while Codex did the
+                work. Now an icon toggle the size of undo/redo. Which engine is
+                running is shown where it is actually chosen: the panel's tab
+                and the Model picker. */}
+            <button className={`btn-icon ${s.chatOpen ? 'on' : ''}`}
+                    title={s.chatOpen ? 'Hide the AI panel' : 'Show the AI panel'}
+                    onClick={() => s.setChatOpen(!s.chatOpen)}>◧</button>
             <button className="btn-icon" title="Undo (⌘Z)" disabled={!s.canUndo} onClick={s.undo}>↩</button>
             <button className="btn-icon" title="Redo (⇧⌘Z)" disabled={!s.canRedo} onClick={s.redo}>↪</button>
-            <button className="btn-ghost" title="Version history" onClick={() => s.setModal('history')}>History</button>
+            <button className="btn-icon" title="Version history" onClick={() => s.setModal('history')}>⟲</button>
             <AudioOut s={s} />
             {/* which release this is (REN-168) — a student reporting a bug can
                 read it off the header instead of digging in the terminal */}
@@ -162,7 +168,7 @@ export default function Editor({ s }) {
         <div className="menu-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) s.setMenuOpen(false) }}>
           <div className="menu-card">
             <button className="menu-row" onClick={() => { s.setMenuOpen(false); s.setLeftTab('claude'); s.setChatOpen(true) }}>
-              <span className="dot" />Claude chat
+              <span className="dot" />{s.engineName} chat
             </button>
             <button className="menu-row" onClick={() => { s.setMenuOpen(false); s.setLeftTab('script'); s.setChatOpen(true) }}>
               <span className="dot" />Script

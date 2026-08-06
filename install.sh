@@ -186,7 +186,13 @@ for c in brew node claude codex ffmpeg whisper-cli uv; do
   p="$(command -v "$c" 2>/dev/null || true)"
   [ -n "$p" ] && SVC_PATH="$(dirname "$p"):$SVC_PATH"
 done
-[ -d "$HOME/.local/bin" ] && SVC_PATH="$HOME/.local/bin:$SVC_PATH"
+# ~/.local/bin unconditionally — it is where Claude Code's own installer puts
+# its binary, and the directory may not exist YET when this runs (install the
+# app first, the CLI after, and the service could never see it). The server
+# also searches these places itself now, so a CLI installed later is found
+# without re-running this script — but a correct PATH here is still what the
+# spawned CLI needs to reach its own `node`.
+SVC_PATH="$HOME/.local/bin:$SVC_PATH"
 # de-duplicate, keep first occurrence
 SVC_PATH="$(printf "%s" "$SVC_PATH" | tr ':' '\n' | awk '!seen[$0]++' | paste -sd: -)"
 
@@ -224,6 +230,10 @@ step "8/8  your AI subscription"
 HAVE_AI=0
 if command -v claude >/dev/null 2>&1; then ok "Claude Code CLI found"; HAVE_AI=1; fi
 if command -v codex  >/dev/null 2>&1; then ok "Codex CLI found";       HAVE_AI=1; fi
+if [ "$HAVE_AI" = "1" ] && ! command -v claude >/dev/null 2>&1; then
+  warn "no Claude Code CLI — the model picker will offer ONLY Codex."
+  printf "     To use Opus/Sonnet/Fable too:  npm i -g @anthropic-ai/claude-code   then: claude\n"
+fi
 if [ "$HAVE_AI" = "0" ]; then
   warn "no AI CLI found — the editor works, but AI edits will not run."
   printf "     Install one and log in with YOUR OWN subscription:\n"

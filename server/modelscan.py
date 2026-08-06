@@ -169,7 +169,13 @@ def refresh(env_for, engines_available):
                 continue
             for mid in scan_binary(eng):
                 key = f"{eng}:{mid}"
-                if key not in known:
+                # Re-probe a model that FAILED, once its result is stale.
+                # `key not in known` alone meant one 404 — from a plan that
+                # did not include the model yet, or a network blip during the
+                # probe — hid that model forever, even after an upgrade.
+                prev = known.get(key)
+                if prev is None or (not prev.get("ok")
+                                    and time.time() - prev.get("checked", 0) > TTL):
                     candidates.append((eng, mid, key))
         # newest-looking first, and never probe more than MAX_PROBES per refresh
         candidates.sort(key=lambda c: c[1], reverse=True)

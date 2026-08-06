@@ -1109,7 +1109,7 @@ export default function Player({ s, onImportVideo }) {
       ) : (
         <div className="preview-empty" style={{ aspectRatio: aspect }}>
           <b>No source video yet</b>
-          <span>Import your raw video to start cutting — or ask Claude to bring one in.</span>
+          <span>Import your raw video to start cutting — or ask the AI to bring one in.</span>
           <button className="btn-import-teal" onClick={onImportVideo}>Import video…</button>
         </div>
       )}

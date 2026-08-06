@@ -242,7 +242,82 @@ async def auth_login(request: Request):
                     samesite="lax", secure=secure, path="/")
     return resp
 
-CLAUDE_BIN = shutil.which("claude") or "/usr/local/bin/claude"
+# ── finding the AI CLIs ───────────────────────────────────────────────────────
+# shutil.which() only sees the PATH THIS PROCESS got, and under launchd that is
+# the short list written into the plist — which does not include ~/.local/bin,
+# where Claude Code's own installer puts its binary. The failure is silent and
+# very confusing: install.sh runs in the user's own shell, finds `claude`, and
+# says "Claude Code CLI found" — then the app offers only Codex, because the
+# SERVER cannot see it. (Hit by the first outside tester.)
+#
+# So look where these tools actually install to, and if that still misses, ask
+# the login shell — it knows the PATH the user really has.
+_CLI_DIRS = [
+    Path.home() / ".local" / "bin",         # Claude Code native installer
+    Path("/opt/homebrew/bin"),              # Homebrew (Apple silicon)
+    Path("/usr/local/bin"),                 # Homebrew (Intel), system-wide npm
+    Path.home() / ".claude" / "local",      # older Claude Code local install
+    Path.home() / ".bun" / "bin",
+    Path.home() / ".volta" / "bin",
+    Path.home() / ".npm-global" / "bin",
+    Path.home() / "Library" / "pnpm",
+    Path.home() / "bin",
+]
+# node version managers put the global bin under a per-version directory
+_CLI_GLOBS = [
+    ".nvm/versions/node/*/bin",
+    ".local/share/fnm/node-versions/*/installation/bin",
+    ".asdf/installs/nodejs/*/bin",
+]
+_CLI_CACHE = {}          # name -> (path or None, when)
+_CLI_MISS_TTL = 60       # re-look this often after a miss, so installing the
+                         # CLI while the app runs is picked up without a restart
+
+
+def _login_shell_which(name):
+    """Ask the user's login shell where the CLI is. Last resort: it costs a
+    shell startup, so it only runs when every known location has missed."""
+    shell = os.environ.get("SHELL") or "/bin/zsh"
+    try:
+        r = subprocess.run([shell, "-lc", f"command -v {name}"],
+                           capture_output=True, text=True, timeout=10)
+        p = (r.stdout or "").strip().splitlines()[-1:] or [""]
+        p = p[0].strip()
+        return p if p.startswith("/") and Path(p).is_file() else None
+    except Exception:  # noqa: BLE001 — a weird shell must not break detection
+        return None
+
+
+def find_cli(name):
+    """Absolute path to an AI CLI, or None. Cached — this runs on every request
+    that asks which engines are available."""
+    hit, when = _CLI_CACHE.get(name, (None, 0))
+    if when and (hit or time.time() - when < _CLI_MISS_TTL):
+        if not hit or Path(hit).exists():
+            return hit
+    found = shutil.which(name)
+    if not found:
+        for d in _CLI_DIRS:
+            c = d / name
+            if c.is_file() and os.access(c, os.X_OK):
+                found = str(c)
+                break
+    if not found:
+        for pat in _CLI_GLOBS:
+            # newest version first, so an old node install does not win
+            for d in sorted(Path.home().glob(pat), reverse=True):
+                c = d / name
+                if c.is_file() and os.access(c, os.X_OK):
+                    found = str(c)
+                    break
+            if found:
+                break
+    if not found:
+        found = _login_shell_which(name)
+    _CLI_CACHE[name] = (found, time.time())
+    return found
+
+
 # Long-lived headless auth (`claude setup-token`): paste the token into this
 # file so the chat works even when the interactive OAuth session is stale.
 CLAUDE_TOKEN_FILE = Path.home() / ".claude" / "video-studio-token"
@@ -284,9 +359,8 @@ def resolve_model(key):
 
 def engine_ready(engine):
     if engine == "codex":
-        return bool((shutil.which("codex") or Path(CODEX_BIN).exists())
-                    and (Path.home() / ".codex" / "auth.json").exists())
-    return bool(shutil.which("claude") or Path(CLAUDE_BIN).exists())
+        return bool(find_cli("codex") and (Path.home() / ".codex" / "auth.json").exists())
+    return bool(find_cli("claude"))
 # effort → extended-thinking budget. "ultracode" caps the budget like "max" but
 # also appends an exhaustive/self-verifying directive to the prompt (below).
 CHAT_EFFORT_TOKENS = {"low": 2048, "medium": 10000, "high": 20000,
@@ -435,9 +509,9 @@ def learn_pref(message: str, reply: str, model_key: str = CHAT_DEFAULT_MODEL):
             "video-specific, a one-off, or already covered, output exactly: NONE"
         )
         _, spec = resolve_model(model_key)
-        if spec["engine"] == "claude" and (shutil.which("claude") or Path(CLAUDE_BIN).exists()):
+        if spec["engine"] == "claude" and find_cli("claude"):
             r = subprocess.run(
-                [CLAUDE_BIN, "-p", dp, "--model", "claude-haiku-4-5-20251001"],
+                [find_cli("claude"), "-p", dp, "--model", "claude-haiku-4-5-20251001"],
                 cwd=str(ROOT), env=claude_env(), stdin=subprocess.DEVNULL,
                 capture_output=True, text=True, timeout=120)
         else:
@@ -951,6 +1025,22 @@ Reply with ONE short line: how many clip openings you trimmed, e.g. "trimmed 2 c
     return None
 
 
+def _child_path(path):
+    """PATH for a spawned CLI. The launchd PATH is minimal, so add the usual
+    bin dirs AND the directory the CLI was actually found in — an npm-installed
+    claude is a script that needs its sibling `node` to be reachable."""
+    parts = path.split(":")
+    extras = ["/opt/homebrew/bin", "/usr/local/bin", str(Path.home() / ".local" / "bin")]
+    for name in ("claude", "codex"):
+        found = _CLI_CACHE.get(name, (None, 0))[0]
+        if found:
+            extras.append(str(Path(found).parent))
+    for extra in extras:
+        if extra and extra not in parts:
+            parts.append(extra)
+    return ":".join(parts)
+
+
 def claude_env(effort=None):
     """Child env for `claude -p`: strip this process's Claude/Anthropic vars
     (they may point at another session) and inject the setup-token if present.
@@ -958,11 +1048,7 @@ def claude_env(effort=None):
     claude CLI needs `node` on it. `effort` sets the extended-thinking budget."""
     env = {k: v for k, v in os.environ.items()
            if not (k.startswith("CLAUDE") or k.startswith("ANTHROPIC") or k == "CLAUDECODE")}
-    path = env.get("PATH", "/usr/bin:/bin")
-    for extra in ("/opt/homebrew/bin", "/usr/local/bin"):
-        if extra not in path.split(":"):
-            path = f"{path}:{extra}"
-    env["PATH"] = path
+    env["PATH"] = _child_path(env.get("PATH", "/usr/bin:/bin"))
     if effort in CHAT_EFFORT_TOKENS:
         env["MAX_THINKING_TOKENS"] = str(CHAT_EFFORT_TOKENS[effort])
     if CLAUDE_TOKEN_FILE.exists():
@@ -978,7 +1064,6 @@ def redact_secrets(text: str) -> str:
     return re.sub(r"sk-ant-[A-Za-z0-9_\-]+", "sk-ant-***", text or "")
 
 
-CODEX_BIN = shutil.which("codex") or "/opt/homebrew/bin/codex"
 CODEX_EFFORT = {"low": "low", "medium": "medium", "high": "high",
                 "max": "high", "ultracode": "high"}
 
@@ -988,11 +1073,7 @@ def codex_env():
     widen PATH like claude_env. Codex signs in with the ChatGPT subscription."""
     env = {k: v for k, v in os.environ.items()
            if not (k.startswith("CLAUDE") or k.startswith("ANTHROPIC") or k == "CLAUDECODE")}
-    path = env.get("PATH", "/usr/bin:/bin")
-    for extra in ("/opt/homebrew/bin", "/usr/local/bin"):
-        if extra not in path.split(":"):
-            path = f"{path}:{extra}"
-    env["PATH"] = path
+    env["PATH"] = _child_path(env.get("PATH", "/usr/bin:/bin"))
     return env
 
 
@@ -1026,7 +1107,7 @@ def run_agent(prompt, model_key, effort, timeout, cwd=None, on_proc=None):
     _, spec = resolve_model(model_key)
     cwd = cwd or str(ROOT)
     if spec["engine"] == "codex":
-        if not (CODEX_BIN and Path(CODEX_BIN).exists()):
+        if not find_cli("codex"):
             return subprocess.CompletedProcess(
                 ["codex"], 127, "",
                 "Codex CLI not installed — `brew install codex` and run `codex login`.")
@@ -1035,7 +1116,7 @@ def run_agent(prompt, model_key, effort, timeout, cwd=None, on_proc=None):
         try:
             # --ignore-user-config: a student's ~/.codex/config.toml (custom model/
             # provider/hooks) must not hijack headless runs; auth still applies.
-            cmd = [CODEX_BIN, "exec", "--dangerously-bypass-approvals-and-sandbox",
+            cmd = [find_cli("codex"), "exec", "--dangerously-bypass-approvals-and-sandbox",
                    "--skip-git-repo-check", "--ignore-user-config", "-o", outp,
                    "-c", f"model_reasoning_effort={CODEX_EFFORT.get(effort, 'medium')}"]
             if spec.get("id"):
@@ -1054,11 +1135,11 @@ def run_agent(prompt, model_key, effort, timeout, cwd=None, on_proc=None):
                 os.unlink(outp)
             except OSError:
                 pass
-    if not (shutil.which("claude") or Path(CLAUDE_BIN).exists()):
+    if not find_cli("claude"):
         return subprocess.CompletedProcess(
             ["claude"], 127, "",
             "Claude CLI not installed — install Claude Code and run `claude setup-token`.")
-    cmd = [CLAUDE_BIN, "-p", prompt, "--model", spec["id"],
+    cmd = [find_cli("claude"), "-p", prompt, "--model", spec["id"],
            "--permission-mode", "bypassPermissions"]
     return _run_capture(cmd, cwd, claude_env(effort), timeout, on_proc)
 

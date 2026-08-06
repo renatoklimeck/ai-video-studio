@@ -32,7 +32,7 @@ export default function Library({ s }) {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
             <div className="brand-title">AI Video Studio</div>
             <div className="brand-sub">
-              fine-tuning console · Claude ⇄ you
+              fine-tuning console · {s.engineName} ⇄ you
               {s.appVersion && <> · <span className="app-version inline">{s.appVersion}</span></>}
             </div>
           </div>
@@ -74,7 +74,7 @@ export default function Library({ s }) {
                 </div>
                 <div className="right">
                   <div className={`proj-by ${pr.by === 'claude' ? 'claude' : ''}`}>
-                    {pr.by === 'claude' ? 'Claude edit' : 'yours'} · {ago(pr.editedAt)}
+                    {pr.by === 'claude' ? 'AI edit' : 'yours'} · {ago(pr.editedAt)}
                   </div>
                   <button className="card-btn" title="Duplicate"
                           onClick={(e) => { e.stopPropagation(); s.duplicateProject(pr.id) }}>⧉</button>
@@ -87,12 +87,12 @@ export default function Library({ s }) {
           {!s.library.length && (
             <div className="lib-empty">
               <b>No projects yet</b>
-              <span>Import a video above, or ask Claude to assemble the first cut — it will show up here.</span>
+              <span>Import a video above, or ask the AI to assemble the first cut — it will show up here.</span>
             </div>
           )}
         </div>
 
-        <div className="lib-footer">Each project is a project.json shared between you and Claude — both edit the same file.</div>
+        <div className="lib-footer">Each project is a project.json shared between you and the AI — both edit the same file.</div>
       </div>
     </div>
   )

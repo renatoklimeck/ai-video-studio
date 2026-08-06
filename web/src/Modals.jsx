@@ -307,7 +307,7 @@ export function HistoryModal({ s }) {
                 <div className="hist-when">{fmtWhen(sn.ts * 1000)}</div>
               </div>
               <div className={`hist-by ${sn.author === 'claude' ? 'claude' : ''}`}>
-                {sn.author === 'claude' ? 'Claude' : 'You'}
+                {sn.author === 'claude' ? 'AI' : 'You'}
               </div>
             </div>
           ))}
