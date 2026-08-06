@@ -202,7 +202,10 @@ async def auth_middleware(request: Request, call_next):
     # SIGKILLs the whole process group, so "idle" has to mean idle, not "no
     # export running". GETs are excluded on purpose — the client polls
     # /api/job and /api/version forever and would keep the machine "busy".
-    counted = request.method != "GET"
+    # Asking for an update is not "the user is editing". Without this the POST
+    # marked activity, update.sh's own re-check a second later saw someone
+    # active, and every manual update deferred — the button did nothing.
+    counted = request.method != "GET" and not request.url.path.startswith("/api/update")
     if counted:
         # a counter, not just a timestamp: an upload of a 4K source is ONE
         # request that streams for minutes with nothing in JOBS to show for it,
@@ -2365,8 +2368,12 @@ def auto_update_on():
     return bool(read_settings().get("autoUpdate", True))
 
 
-def busy_reason():
+def busy_reason(quiet=True):
     """Why it is NOT safe to restart right now, or None.
+
+    `quiet=False` drops the "nobody touched anything recently" rule and keeps
+    only the hard blockers. A person who just clicked Update IS the recent
+    activity; making them wait two minutes for their own click is nonsense.
 
     Deliberately conservative. `launchctl kickstart -k` kills the server's whole
     process GROUP, so a restart takes every ffmpeg, whisper and agent child with
@@ -2382,9 +2389,9 @@ def busy_reason():
     with PREWARM_LOCK:
         if CUT_WARM:
             return "reading audio for cut boundaries"
-    quiet = time.time() - _LAST_ACTIVITY[0]
-    if quiet < QUIET_SECONDS:
-        return f"someone was editing {int(quiet)}s ago"
+    idle = time.time() - _LAST_ACTIVITY[0]
+    if quiet and idle < QUIET_SECONDS:
+        return f"someone was editing {int(idle)}s ago"
     # NEVER stash somebody's uncommitted work behind their back. On the author's
     # own machine this checkout IS the app, so a silent `git stash` would park
     # work in progress with no one watching.
@@ -2416,6 +2423,7 @@ def _start_update(auto=False, target=""):
         pass
     _UPDATE_PROC[0] = subprocess.Popen(
         ["/bin/bash", str(script)], cwd=str(ROOT),
+        env={**os.environ, "VSTUDIO_UPDATE_AUTO": "1" if auto else "0"},
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True)
     return {"started": True}
@@ -2457,12 +2465,14 @@ def _auto_update_loop():
 
 
 @app.get("/api/update/busy")
-def update_busy():
+def update_busy(quiet: int = 1):
     """Is it safe to restart RIGHT NOW? update.sh asks again immediately before
     it touches anything, because between the updater deciding and the pull
     finishing there are 30-90 seconds in which the user can start a 20-minute
-    export — and the restart at the end would kill it."""
-    return {"busy": busy_reason()}
+    export — and the restart at the end would kill it.
+
+    quiet=0 for a person who just clicked Update: only the hard blockers."""
+    return {"busy": busy_reason(quiet=bool(quiet))}
 
 
 @app.get("/api/settings")
@@ -2485,6 +2495,10 @@ def put_settings(body: dict = Body(...)):
 def update_run():
     """Start the update. Detached on purpose: its final step restarts THIS
     server, so an update running inside it would be killed halfway."""
+    hard = busy_reason(quiet=False)
+    if hard:
+        # tell them, do not silently do nothing
+        return {"started": False, "reason": hard}
     r = _start_update(auto=False, target="")
     if not r.get("started") and r.get("reason") == "update script missing":
         raise HTTPException(400, "update script missing")

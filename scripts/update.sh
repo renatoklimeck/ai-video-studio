@@ -41,10 +41,17 @@ say() { printf "%s\n" "$*"; }
 # decided this was a good moment up to a minute ago; a render started since
 # then would be killed by the restart at the end of this script.
 PORT="${VSTUDIO_PORT:-3030}"
-for scheme in https http; do
-  BUSY="$(curl -sk --max-time 5 "$scheme://127.0.0.1:$PORT/api/update/busy" 2>/dev/null || true)"
-  [ -n "$BUSY" ] && break
-done
+# quiet=0 when a person clicked Update: they ARE the recent activity, so only
+# the hard blockers (a running job, an upload) should stop them.
+Q="${VSTUDIO_UPDATE_AUTO:-1}"
+[ "$Q" = "1" ] && Q=1 || Q=0
+busy_now() {
+  for scheme in https http; do
+    b="$(curl -sk --max-time 5 "$scheme://127.0.0.1:$PORT/api/update/busy?quiet=$Q" 2>/dev/null || true)"
+    [ -n "$b" ] && { printf "%s" "$b"; return; }
+  done
+}
+BUSY="$(busy_now)"
 case "$BUSY" in
   *'"busy": null'*|*'"busy":null'*|"") ;;   # idle, or the server did not answer
   *) say "DONE deferred"                     # something is running — try later
@@ -132,8 +139,7 @@ record ok
 # do not want to sit in.
 say "STEP restarting"
 for _ in $(seq 1 60); do
-  B="$(curl -sk --max-time 5 "https://127.0.0.1:$PORT/api/update/busy" 2>/dev/null \
-       || curl -s --max-time 5 "http://127.0.0.1:$PORT/api/update/busy" 2>/dev/null || true)"
+  B="$(busy_now)"
   case "$B" in
     *'"busy": null'*|*'"busy":null'*|"") break ;;
     *) sleep 20 ;;

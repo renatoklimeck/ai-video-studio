@@ -42,7 +42,15 @@ export default function UpdateButton() {
   const run = async () => {
     setAsk(null)
     setPhase('running')
-    try { await api.updateRun() } catch { setPhase('failed'); return }
+    // The server refuses while an export or an upload is running; say so
+    // instead of spinning on a popup that will never finish.
+    let r
+    try { r = await api.updateRun() } catch { setPhase('failed'); return }
+    if (r && r.started === false) {
+      setLines([`ERROR ${r.reason} — try again when it finishes.`])
+      setPhase('failed')
+      return
+    }
     // Keep polling THROUGH the restart at the end: the requests that fail while
     // the server is down are expected, not an error.
     poll.current = setInterval(async () => {
