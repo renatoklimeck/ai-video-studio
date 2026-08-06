@@ -2368,7 +2368,7 @@ def auto_update_on():
     return bool(read_settings().get("autoUpdate", True))
 
 
-def busy_reason(quiet=True):
+def busy_reason(quiet=True, ignore_update=False):
     """Why it is NOT safe to restart right now, or None.
 
     `quiet=False` drops the "nobody touched anything recently" rule and keeps
@@ -2379,7 +2379,10 @@ def busy_reason(quiet=True):
     process GROUP, so a restart takes every ffmpeg, whisper and agent child with
     it — a 20-minute export dies at 19 minutes and the student is told nothing
     except that the job vanished."""
-    if update_in_progress():
+    # `ignore_update` for the caller that IS the update: update.sh asks this
+    # endpoint whether it is safe to proceed, and answering "an update is
+    # running" made every run defer against itself. Cost me an afternoon.
+    if not ignore_update and update_in_progress():
         return "an update is already running"
     if any(j.get("status") == "running" for j in JOBS.values()):
         return "a job is running"
@@ -2472,7 +2475,7 @@ def update_busy(quiet: int = 1):
     export — and the restart at the end would kill it.
 
     quiet=0 for a person who just clicked Update: only the hard blockers."""
-    return {"busy": busy_reason(quiet=bool(quiet))}
+    return {"busy": busy_reason(quiet=bool(quiet), ignore_update=True)}
 
 
 @app.get("/api/settings")
