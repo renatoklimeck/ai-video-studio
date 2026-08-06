@@ -756,12 +756,20 @@ def main():
         script = script.replace(f"[{k - 1}:a]", f"[__{k}:a]")
     script = script.replace("[__", "[")
     Path(afilter).write_text(script)
+    # Mux to a .part file and rename on success. Written straight to the final
+    # name, an export killed mid-mux (the app restarting, the machine sleeping,
+    # a crash) left a truncated mp4 sitting at exactly the filename a finished
+    # render would have — it looks done, it plays for four seconds, and the app
+    # gets the blame. os.replace is atomic within a filesystem.
+    part = str(Path(args.out).with_suffix(".part.mp4"))
     cmd += ["-filter_complex_script", afilter, "-map", "0:v", "-map", "[aout]",
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "256k", "-movflags", "+faststart", args.out]
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "256k", "-movflags", "+faststart", part]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print(r.stderr[-1500:])
+        Path(part).unlink(missing_ok=True)
         sys.exit(1)
+    os.replace(part, args.out)
     shutil.rmtree(tmpdir, ignore_errors=True)
     print(f"PROGRESS {n_frames}/{n_frames}", flush=True)
     print(f"done: {args.out}", flush=True)

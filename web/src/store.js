@@ -89,7 +89,15 @@ export function useStudio() {
   const [transcribing, setTranscribing] = useState([]) // srcKeys with a running job
   const [chatOpen, setChatOpen] = useState(window.innerWidth >= 760)
   const [chatMsgs, setChatMsgs] = useState([])
-  const [chatInput, setChatInput] = useState('')
+  // Kept in sessionStorage so a reload — the app updating itself, a crash, a
+  // tab restore — does not eat a half-typed instruction.
+  const [chatInput, _setChatInput] = useState(() => {
+    try { return sessionStorage.getItem('vs-chat-draft') || '' } catch { return '' }
+  })
+  const setChatInput = useCallback((v) => {
+    _setChatInput(v)
+    try { v ? sessionStorage.setItem('vs-chat-draft', v) : sessionStorage.removeItem('vs-chat-draft') } catch { /* private mode */ }
+  }, [])
   const [claudeTyping, setClaudeTyping] = useState(false)
   // Which Claude model + reasoning effort the chat uses (REN-118); remembered
   // Which ENGINE a picker key means. The key is "<engine>:<id>"; legacy short
@@ -200,6 +208,17 @@ export function useStudio() {
     load()
     return () => { dead = true }
   }, [])
+  // The app now installs updates by itself, so the page can reload under you.
+  // Say what happened once, instead of leaving you wondering why it blinked.
+  useEffect(() => {
+    if (!appVersion) return
+    let from = null
+    try { from = localStorage.getItem('vs-updated-from') } catch { return }
+    if (from == null) return
+    try { localStorage.removeItem('vs-updated-from') } catch { /* private mode */ }
+    if (from && from !== appVersion) showToast(`Updated to ${appVersion}`)
+  }, [appVersion, showToast])
+
   useEffect(() => {
     const onResize = () => { if (window.innerWidth > 0) setVw(window.innerWidth) }
     window.addEventListener('resize', onResize)
@@ -258,7 +277,20 @@ export function useStudio() {
         if (version) setAppVersion(version)
         if (!build) return
         if (base == null) { base = build; return }
-        if (build !== base) { await flushSave(); window.location.reload() }
+        if (build !== base) {
+          await flushSave()
+          // Remember what we came from, so the page can say what it updated to
+          // once it is back. Cleared by the toast that reads it.
+          try { localStorage.setItem('vs-updated-from', appVersion || '') } catch { /* private mode */ }
+          // NOT a bare reload: the build id changes the instant the new bundle
+          // is on disk, which is seconds BEFORE update.sh restarts the server.
+          // Reloading into that window gives a connection-refused page with no
+          // JS left to recover it — the app looked dead until you hit refresh.
+          for (let i = 0; i < 60; i++) {
+            try { await api.version(); break } catch { await new Promise((r) => setTimeout(r, 1000)) }
+          }
+          window.location.reload()
+        }
       } catch { /* server briefly down — next tick retries */ }
     }
     const iv = setInterval(check, 60000)

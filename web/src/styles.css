@@ -337,7 +337,10 @@ input[type="range"] { accent-color: var(--accent); width: 100%; margin: 0; }
 @media (max-width: 1199px) { .add-group { flex-shrink: 1; } }
 .add-group > * { flex: none; }
 .header > .btn-primary, .header .btn-claude, .header .btn-ghost,
-.header .audioout, .header .app-version, .header .btn-menu { flex: none; }
+.header .audioout, .header .app-version, .header /* the panel toggle sits with the panel, not with the right-hand controls */
+.panel-toggle { font-size: 15px; line-height: 1; }
+.btn-icon.on { border-color: rgba(95,217,201,0.5); background: rgba(95,217,201,0.1); color: var(--accent-ai); }
+.btn-menu { flex: none; }
 .spacer { flex: 1; }
 .btn-claude {
   height: 30px; padding: 0 12px; border-radius: 8px;

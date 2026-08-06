@@ -24,7 +24,7 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi import Body, FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -176,6 +176,19 @@ def is_local_direct(request: Request) -> bool:
     return peer in ("127.0.0.1", "::1") and "x-forwarded-for" not in request.headers
 
 
+# When the user last did something that CHANGES state. The auto-updater needs
+# it because JOBS does not see uploads, /cutout (which runs inline) or the
+# cut-boundary warm-up — and a restart SIGKILLs the whole process group, so
+# "safe to update" has to mean genuinely idle.
+_LAST_ACTIVITY = [0.0]
+_INFLIGHT = [0]
+_INFLIGHT_LOCK = threading.Lock()
+
+
+def mark_activity():
+    _LAST_ACTIVITY[0] = time.time()
+
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     if auth_required() and not is_local_direct(request):
@@ -183,7 +196,27 @@ async def auth_middleware(request: Request, call_next):
         public = p in AUTH_PUBLIC_PATHS or p.startswith(AUTH_PUBLIC_PREFIXES)
         if not public and not session_valid(request.cookies.get(COOKIE_NAME)):
             return JSONResponse({"error": "auth required"}, status_code=401)
-    resp = await call_next(request)
+    # Anything that CHANGES something counts as "the user is working", and so
+    # does a request that is still in flight. The auto-updater reads this: JOBS
+    # does not cover uploads, /cutout (runs inline) or /cut_warm, and a restart
+    # SIGKILLs the whole process group, so "idle" has to mean idle, not "no
+    # export running". GETs are excluded on purpose — the client polls
+    # /api/job and /api/version forever and would keep the machine "busy".
+    counted = request.method != "GET"
+    if counted:
+        # a counter, not just a timestamp: an upload of a 4K source is ONE
+        # request that streams for minutes with nothing in JOBS to show for it,
+        # and a timestamp taken at its start goes stale while it is still going
+        with _INFLIGHT_LOCK:
+            _INFLIGHT[0] += 1
+        mark_activity()
+    try:
+        resp = await call_next(request)
+    finally:
+        if counted:
+            with _INFLIGHT_LOCK:
+                _INFLIGHT[0] -= 1
+            mark_activity()
     # never cache the app shell — WebKit's heuristic caching kept a days-old UI
     # alive in the standalone app (REN-131); hashed /assets stay cacheable.
     if request.url.path in ("/", "/index.html"):
@@ -2283,29 +2316,161 @@ def update_check():
             # subject (REN-168). Missing on checkouts older than the VERSION
             # file, so the popup falls back to the subject.
             latest_version = (git("show", f"origin/{branch}:VERSION").stdout or "").strip()
+        # the remote sha, so the auto-updater can remember which exact commit
+        # failed here and stop retrying it every half hour
+        head = (git("rev-parse", f"origin/{branch}").stdout or "").strip() if behind else ""
         return {"supported": True, "behind": behind, "latest": subject,
                 "latestVersion": latest_version, "version": read_version(),
+                "head": head, "busy": busy_reason() if behind else None,
                 "current": (git("log", "-1", "--format=%s").stdout or "").strip()}
     except Exception as e:  # noqa: BLE001 — never let this break the header
         return {"supported": False, "reason": str(e)[:120]}
 
 
-@app.post("/api/update")
-def update_run():
-    """Start the update. Detached on purpose: its final step restarts THIS
-    server, so an update running inside it would be killed halfway."""
+# Auto-update state, kept OUTSIDE the repo for the same reason the log is: an
+# update stashes the working tree.
+UPDATE_STATE = UPDATE_LOG.with_name("AIVideoStudio-update-state.json")
+_UPDATE_LOCK = threading.Lock()
+_UPDATING = [0.0]          # when the running update started (0 = none)
+UPDATE_STUCK_AFTER = 20 * 60
+SETTINGS_FILE = Path.home() / ".claude" / "video-studio-settings.json"
+# Tunable so support (and the test rig) can make this fast or turn the pacing
+# down on a machine that is always busy.
+QUIET_SECONDS = int(os.environ.get("VSTUDIO_QUIET_SECONDS", 120))
+AUTO_FIRST_DELAY = int(os.environ.get("VSTUDIO_AUTO_FIRST_DELAY", 300))
+AUTO_EVERY = int(os.environ.get("VSTUDIO_AUTO_EVERY", 30 * 60))
+
+
+def read_settings():
+    try:
+        return json.loads(SETTINGS_FILE.read_text())
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def auto_update_on():
+    if os.environ.get("VSTUDIO_NO_AUTO_UPDATE"):
+        return False
+    return bool(read_settings().get("autoUpdate", True))
+
+
+def busy_reason():
+    """Why it is NOT safe to restart right now, or None.
+
+    Deliberately conservative. `launchctl kickstart -k` kills the server's whole
+    process GROUP, so a restart takes every ffmpeg, whisper and agent child with
+    it — a 20-minute export dies at 19 minutes and the student is told nothing
+    except that the job vanished."""
+    # a FAILED update leaves the server alive with the flag still set; without
+    # the age check it would never auto-update again
+    if _UPDATING[0] and time.time() - _UPDATING[0] < UPDATE_STUCK_AFTER:
+        return "an update is already running"
+    if any(j.get("status") == "running" for j in JOBS.values()):
+        return "a job is running"
+    with _INFLIGHT_LOCK:
+        if _INFLIGHT[0]:
+            return "a request is still in flight"
+    with PREWARM_LOCK:
+        if CUT_WARM:
+            return "reading audio for cut boundaries"
+    quiet = time.time() - _LAST_ACTIVITY[0]
+    if quiet < QUIET_SECONDS:
+        return f"someone was editing {int(quiet)}s ago"
+    # NEVER stash somebody's uncommitted work behind their back. On the author's
+    # own machine this checkout IS the app, so a silent `git stash` would park
+    # work in progress with no one watching.
+    try:
+        dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
+                               cwd=ROOT, capture_output=True, text=True, timeout=20)
+        if (dirty.stdout or "").strip():
+            return "this copy has uncommitted changes"
+    except Exception:  # noqa: BLE001
+        return "could not read git status"
+    return None
+
+
+def _start_update(auto=False, target=""):
+    """Single-flight. Two tabs both posting /api/update would run two
+    `git stash` + `git pull` + `npm install` in one worktree at once."""
     script = ROOT / "scripts" / "update.sh"
     if not script.exists():
-        raise HTTPException(400, "update script missing")
+        return {"started": False, "reason": "update script missing"}
+    with _UPDATE_LOCK:
+        if _UPDATING[0] and time.time() - _UPDATING[0] < UPDATE_STUCK_AFTER:
+            return {"started": False, "reason": "already running"}
+        _UPDATING[0] = time.time()
     try:
         UPDATE_LOG.parent.mkdir(parents=True, exist_ok=True)
         UPDATE_LOG.write_text("STEP starting\n")
+        _atomic_write_text(UPDATE_STATE, json.dumps(
+            {"target": target, "auto": auto, "started": int(time.time())}))
     except OSError:
         pass
     subprocess.Popen(["/bin/bash", str(script)], cwd=str(ROOT),
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True)
     return {"started": True}
+
+
+def _update_failed_before(target):
+    """Did THIS exact commit already fail here? Without this, a release that
+    cannot build is retried every 30 minutes forever — update.sh rolls back, so
+    `behind` stays > 0 and the next tick tries the same thing again."""
+    if not target:
+        return False
+    try:
+        st = json.loads(UPDATE_STATE.read_text())
+    except Exception:  # noqa: BLE001
+        return False
+    return st.get("target") == target and st.get("result") == "failed"
+
+
+def _auto_update_loop():
+    """Install published updates by themselves. A student should never have to
+    know an update exists — but should also never lose a render to one."""
+    time.sleep(AUTO_FIRST_DELAY)
+    while True:
+        try:
+            if auto_update_on():
+                info = update_check()
+                target = (info or {}).get("head") or ""
+                if info.get("supported") and info.get("behind", 0) > 0 \
+                        and not _update_failed_before(target):
+                    why = busy_reason()
+                    if why:
+                        print(f"[auto-update] deferred: {why}", flush=True)
+                    else:
+                        print(f"[auto-update] installing {info.get('latestVersion') or target[:8]}", flush=True)
+                        _start_update(auto=True, target=target)
+        except Exception as e:  # noqa: BLE001 — the loop must never die
+            print(f"[auto-update] check failed: {str(e)[:120]}", flush=True)
+        time.sleep(AUTO_EVERY)
+
+
+@app.get("/api/settings")
+def get_settings():
+    return {"autoUpdate": auto_update_on(),
+            "autoUpdateLocked": bool(os.environ.get("VSTUDIO_NO_AUTO_UPDATE"))}
+
+
+@app.put("/api/settings")
+def put_settings(body: dict = Body(...)):
+    s = read_settings()
+    if "autoUpdate" in body:
+        s["autoUpdate"] = bool(body["autoUpdate"])
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(SETTINGS_FILE, json.dumps(s, indent=1))
+    return {"ok": True, "autoUpdate": auto_update_on()}
+
+
+@app.post("/api/update")
+def update_run():
+    """Start the update. Detached on purpose: its final step restarts THIS
+    server, so an update running inside it would be killed halfway."""
+    r = _start_update(auto=False, target="")
+    if not r.get("started") and r.get("reason") == "update script missing":
+        raise HTTPException(400, "update script missing")
+    return r
 
 
 @app.get("/api/update/log")
@@ -3114,6 +3279,10 @@ Reply with ONE short line: how many caption groups you corrected."""
 
 
 report_interrupted_chats()   # say what the last shutdown cut short, before serving
+# Installs published updates by itself when the machine is idle (REN-202). A
+# student should never have to know an update exists — and should never lose a
+# render to one, hence the guards in busy_reason().
+threading.Thread(target=_auto_update_loop, daemon=True).start()
 
 web_dist = ROOT / "web" / "dist"
 if web_dist.exists():

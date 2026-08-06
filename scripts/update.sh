@@ -12,7 +12,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # away mid-run: the script keeps writing to a deleted file and the app watches a
 # log that stopped growing. (Found the hard way in the update rehearsal.)
 LOG="$HOME/Library/Logs/AIVideoStudio-update.log"
+# Which commit this run was aiming at, and how it ended. The auto-updater reads
+# it so a release that cannot build here is attempted ONCE — without this it
+# rolls back, stays "behind", and is retried every half hour forever.
+STATE="$HOME/Library/Logs/AIVideoStudio-update-state.json"
 mkdir -p "$(dirname "$LOG")"
+record() {  # record <ok|failed>
+  target="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('target',''))" "$STATE" 2>/dev/null || true)"
+  printf '{"target": "%s", "result": "%s", "at": %s}\n' "$target" "$1" "$(date +%s)" > "$STATE"
+}
 cd "$ROOT"
 
 # Ask launchd which service actually serves THIS folder instead of assuming the
@@ -75,6 +83,7 @@ PULL="$(git pull --ff-only 2>&1)" || {
        say "      Nothing was changed. Ask for help before forcing anything." ;;
   esac
   restore
+  record failed
   say "DONE failed"
   exit 1
 }
@@ -94,12 +103,14 @@ say "STEP rebuilding the interface"
   say "ERROR the new version failed to build. Put back the one that was working —"
   say "      nothing changed. Try again later, or run ./install.sh to repair."
   restore
+  record failed
   say "DONE failed"
   exit 1
 }
 
 restore
 
+record ok
 say "STEP restarting"
 # launchd brings it straight back (KeepAlive). The browser is polling
 # /api/version and reloads itself as soon as the new build answers.

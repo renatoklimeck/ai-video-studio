@@ -93,6 +93,17 @@ export default function Editor({ s }) {
       <div className="header">
         <button className="btn-icon" title="Back to projects" onClick={s.backToProjects}>←</button>
         <div className="logo-tile sm"><div className="tri" /></div>
+        {/* Directly above the panel it opens and closes. It used to be a wide
+            green button reading "Claude", parked on the far RIGHT of the header
+            — the opposite end of the screen from the thing it controls, and
+            named after an engine it has nothing to do with (a Codex user was
+            told "Claude"). Which engine runs the edit is shown where it is
+            actually chosen: the panel's own tab and the Model picker. */}
+        {!s.isMobile && (
+          <button className={`btn-icon panel-toggle ${s.chatOpen ? 'on' : ''}`}
+                  title={s.chatOpen ? 'Hide the AI panel' : 'Show the AI panel'}
+                  onClick={() => s.setChatOpen(!s.chatOpen)}>◧</button>
+        )}
         <div className="name-wrap">
           <div className="proj-title">{s.isMobile ? p.name : `${p.name} · ${p.w}×${p.h}`}</div>
           <div className={`save-ind ${s.saveState}`}>
@@ -125,16 +136,6 @@ export default function Editor({ s }) {
         <div className="spacer" />
         {!s.isMobile && (
           <>
-            {/* Was a wide green button that said "Claude". Two problems: it
-                cost ~80px in a header that already did not fit, and it named an
-                engine it has nothing to do with — it only shows/hides the left
-                panel, so a Codex user was told "Claude" while Codex did the
-                work. Now an icon toggle the size of undo/redo. Which engine is
-                running is shown where it is actually chosen: the panel's tab
-                and the Model picker. */}
-            <button className={`btn-icon ${s.chatOpen ? 'on' : ''}`}
-                    title={s.chatOpen ? 'Hide the AI panel' : 'Show the AI panel'}
-                    onClick={() => s.setChatOpen(!s.chatOpen)}>◧</button>
             <button className="btn-icon" title="Undo (⌘Z)" disabled={!s.canUndo} onClick={s.undo}>↩</button>
             <button className="btn-icon" title="Redo (⇧⌘Z)" disabled={!s.canRedo} onClick={s.redo}>↪</button>
             <button className="btn-icon" title="Version history" onClick={() => s.setModal('history')}>⟲</button>
