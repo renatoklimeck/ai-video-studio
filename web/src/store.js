@@ -210,17 +210,6 @@ export function useStudio() {
     load()
     return () => { dead = true }
   }, [])
-  // The app now installs updates by itself, so the page can reload under you.
-  // Say what happened once, instead of leaving you wondering why it blinked.
-  useEffect(() => {
-    if (!appVersion) return
-    let from = null
-    try { from = localStorage.getItem('vs-updated-from') } catch { return }
-    if (from == null) return
-    try { localStorage.removeItem('vs-updated-from') } catch { /* private mode */ }
-    if (from && from !== appVersion) showToast(`Updated to ${appVersion}`)
-  }, [appVersion, showToast])
-
   busyRef.current = () => exp.phase === 'rendering' || claudeTyping || !!bgJob
 
   useEffect(() => {
@@ -475,6 +464,20 @@ export function useStudio() {
     clearTimeout(toastTimer.current)
     toastTimer.current = setTimeout(() => setToast(null), 2800)
   }, [])
+
+  // The app installs updates by itself now, so the page can reload under you.
+  // Say what happened once, instead of leaving you wondering why it blinked.
+  // MUST sit below showToast: a dependency array is evaluated during render,
+  // and naming a `const` declared further down is a TDZ error that takes the
+  // whole app to a white screen. (Shipped exactly that in 2026.08.06.2.)
+  useEffect(() => {
+    if (!appVersion) return
+    let from = null
+    try { from = localStorage.getItem('vs-updated-from') } catch { return }
+    if (from == null) return
+    try { localStorage.removeItem('vs-updated-from') } catch { /* private mode */ }
+    if (from && from !== appVersion) showToast(`Updated to ${appVersion}`)
+  }, [appVersion, showToast])
 
   // Apply a clip-structure change and re-anchor captions in the SAME entry, so
   // Captions are now source-anchored (REN-115) — invariant to trim/split/delete,

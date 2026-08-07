@@ -57,6 +57,15 @@ bold "Conferindo que a interface compila"
   || die "o build falhou. Nada foi publicado."
 ok "build ok"
 
+# Compilar não é rodar. Duas vezes num dia só uma versão compilou perfeitamente
+# e serviu tela branca — erro de TDZ, que só aparece na hora de renderizar.
+# Isto monta o app de verdade e recusa a publicação se não desenhar nada.
+bold "Conferindo que a interface ABRE"
+SMOKE="$(node web/smoke.mjs 2>&1)" || die "a interface não abre:
+$SMOKE
+     Nada foi publicado."
+printf "%s\n" "$SMOKE" | sed 's/^  /  ✓ /' 
+
 # ── commit + tag + push ────────────────────────────────────────────────────
 printf "%s\n" "$NEXT" > VERSION
 git add VERSION
